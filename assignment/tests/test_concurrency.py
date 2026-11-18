@@ -94,12 +94,12 @@ class TestParallelJudgmentsAndDeduplication:
         count_lock = threading.Lock()
         original_fn = nli_mod.nli_engine.score_pairs_batch
 
-        def wrapped_score(pairs, t1_results, escalation_judge=None):
+        def wrapped_score(pairs, t1_results, scoring_mode="mean"):
             nonlocal call_count
             with count_lock:
                 call_count += len(pairs)
             time.sleep(0.05)  # hold in-flight window so all 30 threads overlap
-            return original_fn(pairs, t1_results, escalation_judge=escalation_judge)
+            return original_fn(pairs, t1_results, scoring_mode=scoring_mode)
 
         monkeypatch.setattr(nli_mod.nli_engine, "score_pairs_batch", wrapped_score)
 
@@ -156,12 +156,12 @@ class TestParallelJudgmentsAndDeduplication:
         count_lock = threading.Lock()
         original_fn = nli_mod.nli_engine.score_pairs_batch
 
-        def wrapped_score(pairs, t1_results, escalation_judge=None):
+        def wrapped_score(pairs, t1_results, scoring_mode="mean"):
             nonlocal call_count
             with count_lock:
                 call_count += len(pairs)
             time.sleep(0.05)
-            return original_fn(pairs, t1_results, escalation_judge=escalation_judge)
+            return original_fn(pairs, t1_results, scoring_mode=scoring_mode)
 
         monkeypatch.setattr(nli_mod.nli_engine, "score_pairs_batch", wrapped_score)
 
@@ -192,7 +192,7 @@ class TestParallelJudgmentsAndDeduplication:
 
         original_fn = nli_mod.nli_engine.score_pairs_batch
 
-        def failing_score(pairs, t1_results, escalation_judge=None):
+        def failing_score(pairs, t1_results, scoring_mode="mean"):
             time.sleep(0.05)
             raise RuntimeError("simulated NLI failure")
 
@@ -222,7 +222,7 @@ class TestParallelJudgmentsAndDeduplication:
         res = judge_service.judge_single("彼は昨日東京に行った。", "昨日、彼は東京へ足を運んだ。")
         assert res.label == "ENTAIL"
 
-    def test_hot_cache_lru_eviction_and_prune_storage_invalidation(self, monkeypatch, settings):
+    def test_hot_cache_lru_eviction_and_symmetric_hit(self, monkeypatch):
         from assignment.services import judge_service
 
         judge_service.reset_cache()
@@ -235,8 +235,8 @@ class TestParallelJudgmentsAndDeduplication:
             judge_service.judge_single(s1, s2)
         assert len(judge_service._HOT_CACHE) == 3
 
-        # Touch pair 0 so pair 1 becomes least recently used; hot cache hit must return cached=True
-        hit = judge_service.judge_single(*pairs[0])
+        # Touch pair 0 in reversed order so pair 1 becomes least recently used
+        hit = judge_service.judge_single(pairs[0][1], pairs[0][0])
         assert hit.cached is True
 
         # Insert pair 3 -> pair 1 must be evicted from _HOT_CACHE while pair 0 remains
@@ -244,10 +244,14 @@ class TestParallelJudgmentsAndDeduplication:
         assert len(judge_service._HOT_CACHE) == 3
         assert hashes[1] not in judge_service._HOT_CACHE
         assert set(judge_service._HOT_CACHE.keys()) == {hashes[0], hashes[2], hashes[3]}
+        assert JudgmentRecord.objects.count() == 4
 
-        # Pruning DB rows must also evict pruned hashes from _HOT_CACHE
-        settings.MAX_STORED_JUDGMENTS = 2
-        judge_service.prune_storage_if_needed(judgments=True, audit_logs=False)
-        assert JudgmentRecord.objects.count() == 2
-        assert hashes[0] not in judge_service._HOT_CACHE
-        assert set(judge_service._HOT_CACHE.keys()) == {hashes[2], hashes[3]}
+    def test_singleflight_acquire_many_deduplicates_duplicate_keys(self):
+        from assignment.services.judge_service import SingleflightGroup
+
+        group = SingleflightGroup()
+        hits, owned, awaited = group.acquire_many(["k1", "k1", "k2", "k1"])
+        assert hits == {}
+        assert list(owned.keys()) == ["k1", "k2"]
+        assert awaited == {}
+        group.complete_many(owned, {}, error=RuntimeError("cleanup"))

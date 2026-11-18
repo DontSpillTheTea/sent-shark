@@ -186,8 +186,8 @@ def test_run_eval_management_command_produces_provenance_report():
         assert lat["p50_ms"] <= lat["p95_ms"] <= lat["p99_ms"]
 
     hybrid = modes["hybrid"]
-    assert hybrid["accuracy"] >= 0.90
-    assert hybrid["f1"] >= 0.90
+    assert hybrid["accuracy"] >= 0.80
+    assert hybrid["f1"] >= 0.80
     assert hybrid["accuracy"] >= modes["tier1"]["accuracy"]
     assert hybrid["accuracy"] >= modes["tier2"]["accuracy"]
 
@@ -212,33 +212,28 @@ def test_run_eval_raises_command_error_for_missing_fixture(tmp_path):
         call_command("run_eval", "--fixture", str(missing_path))
 
 
-def test_run_tier2_mode_disables_lexical_surface_rewrites(monkeypatch):
+def test_run_tier2_mode_scores_raw_normalized_inputs_without_rewrites(monkeypatch):
     from assignment.management.commands.run_eval import _run_tier2_mode
     from assignment.services import nli_engine as nli_mod
-    from assignment.services.normalizer import Tier1Result, evaluate_tier1
+    from assignment.services.normalizer import Tier1Result
 
     calls: list[dict[str, object]] = []
     original_fn = nli_mod.nli_engine.score_pairs_batch
 
     def recording_score(
         pairs,
-        tier1_results,
-        escalation_judge=None,
-        apply_lexical_surface=True,
+        tier1_results=None,
         scoring_mode="mean",
     ):
         calls.append(
             {
                 "count": len(pairs),
-                "apply_lexical_surface": apply_lexical_surface,
                 "scoring_mode": scoring_mode,
             }
         )
         return original_fn(
             pairs,
             tier1_results,
-            escalation_judge=escalation_judge,
-            apply_lexical_surface=apply_lexical_surface,
             scoring_mode=scoring_mode,
         )
 
@@ -258,13 +253,11 @@ def test_run_tier2_mode_disables_lexical_surface_rewrites(monkeypatch):
     preds, latencies, _ = _run_tier2_mode(items)
     assert len(preds) == 1
     assert len(latencies) == 1
-    # Raw Tier 2 must pass apply_lexical_surface=False on both batch and per-pair calls
     assert len(calls) == 2
-    assert all(call["apply_lexical_surface"] is False for call in calls)
-    # Without lexical surface rewrites, raw MiniLM misfires to NO_ENTAIL on G21
+    assert all(call["scoring_mode"] == "mean" for call in calls)
+    # Without dev-overfit surface rewrites, raw MiniLM scores G21 as NO_ENTAIL
     assert preds[0][0] == "NO_ENTAIL"
 
-    # Verify single-pass un-rewritten surface input when apply_lexical_surface=False
     s1, s2 = "He gave up smoking last year.", "He quit smoking a year ago."
     neutral = Tier1Result(
         decisive=False,
@@ -284,18 +277,13 @@ def test_run_tier2_mode_disables_lexical_surface_rewrites(monkeypatch):
         return orig_tokenizer(premises, hypotheses, **kwargs)
 
     monkeypatch.setattr(nli_mod.nli_engine, "_tokenizer", recording_tokenizer)
-    raw_detail = original_fn([(s1, s2)], [neutral], apply_lexical_surface=False)[0]
+    raw_detail = original_fn([(s1, s2)], [neutral])[0]
     assert raw_detail.label == "NO_ENTAIL"
     assert len(captured_sequences) == 1
     assert captured_sequences[0] == (
         ["He gave up smoking last year", "He quit smoking a year ago"],
         ["He quit smoking a year ago", "He gave up smoking last year"],
     )
-
-    # With Tier 1 canonicals + apply_lexical_surface=True, hybrid evaluates both and gets ENTAIL
-    t1 = evaluate_tier1(s1, s2)
-    hybrid_detail = original_fn([(s1, s2)], [t1], apply_lexical_surface=True)[0]
-    assert hybrid_detail.label == "ENTAIL"
 
 
 def test_holdout_fixture_and_provenance_are_valid_and_disjoint_from_dev():
@@ -437,8 +425,8 @@ def test_run_eval_supports_scoring_modes_and_provenance_metadata():
     assert "entail_margin" in inf_cfg
     assert "contradict_cap" in inf_cfg
     assert inf_cfg["scoring_mode"] == "min"
-    assert inf_cfg["apply_lexical_surface_tier2"] is False
-    assert inf_cfg["apply_lexical_surface_hybrid"] is True
+    assert inf_cfg["ablation"] == "exact_plus_nli"
+    assert inf_cfg["scoring_policy"] == "exact_plus_nli:v1:mean"
 
     assert "by_source" in dev_min_report["dataset"]
     assert "by_stratum" in dev_min_report["dataset"]
@@ -505,10 +493,12 @@ def test_wilson_confidence_interval_and_diagnostics_schema(tmp_path):
     from assignment.management.commands.run_eval import (
         DEFAULT_FINAL_HOLDOUT_PATH,
         _classify_error_category,
+        _get_model_revision,
         _load_and_validate_fixture,
         _resolve_fixture,
         _wilson_ci_95,
     )
+    from assignment.services.nli_engine import nli_engine
 
     lo, hi = _wilson_ci_95(correct=36, total=60)
     assert 0.46 <= lo <= 0.48
@@ -526,14 +516,32 @@ def test_wilson_confidence_interval_and_diagnostics_schema(tmp_path):
     assert (
         _classify_error_category({"stratum": "adversarial_swap"}) == "word_order_or_particle_swap"
     )
+    assert _classify_error_category({"stratum": "ja_paws_swap"}) == "word_order_or_particle_swap"
+    assert _classify_error_category({"stratum": "en_paws_swap"}) == "word_order_or_particle_swap"
     assert _classify_error_category({"stratum": "oneway_entail"}) == "oneway_specificity"
+    assert _classify_error_category({"stratum": "ja_jnli_oneway"}) == "oneway_specificity"
     assert _classify_error_category({"stratum": "contradict"}) == "negation_or_antonym"
+    assert _classify_error_category({"stratum": "ja_jnli_contradict"}) == "negation_or_antonym"
     assert (
         _classify_error_category({"source": "jglue_jnli", "stratum": "bidir_entail"})
         == "caption_codescription"
     )
+    assert (
+        _classify_error_category({"source": "jglue_jnli", "stratum": "ja_jnli_bidir_entail"})
+        == "caption_codescription"
+    )
+    assert (
+        _classify_error_category({"source": "jglue_jnli", "stratum": "ja_jnli_neutral"})
+        == "caption_codescription"
+    )
+    assert _classify_error_category({"stratum": "ja_paws_paraphrase"}) == "lexical_synonym_gap"
+    assert _classify_error_category({"stratum": "en_paws_paraphrase"}) == "lexical_synonym_gap"
     assert _classify_error_category({"phenomenon": "lexical_paraphrase"}) == "lexical_synonym_gap"
     assert _classify_error_category({"phenomenon": "temporal_shift"}) == "other"
+
+    # _get_model_revision must not return global singleton's revision for a different model_name
+    nli_engine.warm_up()
+    assert _get_model_revision("nonexistent/other-model-xyz") == "unknown"
 
     ds_name, ds_path = _resolve_fixture("final_holdout", None)
     assert ds_name == "final_holdout"
@@ -599,7 +607,7 @@ def test_run_eval_supports_ablation_and_misclassification_diagnostics(tmp_path, 
                     "expected_label": "NO_ENTAIL",
                 },
                 {
-                    "id": "D4_RULE_MISMATCH",
+                    "id": "D4_NLI_MISMATCH",
                     "language": "en",
                     "stratum": "contradict",
                     "source": "mini",
@@ -613,48 +621,12 @@ def test_run_eval_supports_ablation_and_misclassification_diagnostics(tmp_path, 
         encoding="utf-8",
     )
 
-    # 1. Test full_hybrid with --diagnostics (captures tier1_exact and tier1_rule short-circuits)
-    out_full = StringIO()
-    call_command(
-        "run_eval",
-        "--fixture",
-        str(fixture),
-        "--ablation",
-        "full_hybrid",
-        "--diagnostics",
-        "--json",
-        stdout=out_full,
-    )
-    rep_full = json.loads(out_full.getvalue())
-    assert rep_full["provenance"]["ablation"] == "full_hybrid"
-    hy_full = rep_full["modes"]["hybrid"]
-    assert "accuracy_ci95" in hy_full
-    assert len(hy_full["accuracy_ci95"]) == 2
-    assert 0.0 <= hy_full["accuracy_ci95"][0] <= hy_full["accuracy_ci95"][1] <= 1.0
-    for breakdown_key in ("by_language", "by_source", "by_stratum"):
-        for bucket in hy_full[breakdown_key].values():
-            assert "accuracy_ci95" in bucket
-            assert len(bucket["accuracy_ci95"]) == 2
-
-    full_by_id = {m["id"]: m for m in hy_full["misclassifications"]}
-    assert "D3_EXACT_MISMATCH" in full_by_id
-    assert full_by_id["D3_EXACT_MISMATCH"]["origin_tier"] == "tier1_exact"
-    assert full_by_id["D3_EXACT_MISMATCH"]["tier1_reason"] == "exact_normalized_match"
-    assert full_by_id["D3_EXACT_MISMATCH"]["directional_nli"] is None
-    assert "D4_RULE_MISMATCH" in full_by_id
-    assert full_by_id["D4_RULE_MISMATCH"]["origin_tier"] == "tier1_rule"
-    assert full_by_id["D4_RULE_MISMATCH"]["tier1_reason"] == "contradiction_veto"
-    assert full_by_id["D4_RULE_MISMATCH"]["directional_nli"] is None
-    assert full_by_id["D4_RULE_MISMATCH"]["error_category"] == "negation_or_antonym"
-
-    # 2. Test exact_plus_nli with --diagnostics (bypasses Tier 1 rules -> D2 fails via tier2_nli)
+    # 1. Test default ablation (exact_plus_nli) with --diagnostics
     out_exact = StringIO()
     call_command(
         "run_eval",
         "--fixture",
         str(fixture),
-        "--ablation",
-        "exact_plus_nli",
         "--diagnostics",
         "--json",
         stdout=out_exact,
@@ -663,10 +635,19 @@ def test_run_eval_supports_ablation_and_misclassification_diagnostics(tmp_path, 
     assert rep_exact["provenance"]["ablation"] == "exact_plus_nli"
     hy_exact = rep_exact["modes"]["hybrid"]
     assert "accuracy_ci95" in hy_exact and len(hy_exact["accuracy_ci95"]) == 2
+    assert 0.0 <= hy_exact["accuracy_ci95"][0] <= hy_exact["accuracy_ci95"][1] <= 1.0
+    for breakdown_key in ("by_language", "by_source", "by_stratum"):
+        for bucket in hy_exact[breakdown_key].values():
+            assert "accuracy_ci95" in bucket
+            assert len(bucket["accuracy_ci95"]) == 2
+
     exact_by_id = {m["id"]: m for m in hy_exact["misclassifications"]}
     assert "D3_EXACT_MISMATCH" in exact_by_id
     assert exact_by_id["D3_EXACT_MISMATCH"]["origin_tier"] == "tier1_exact"
+    assert exact_by_id["D3_EXACT_MISMATCH"]["tier1_reason"] == "exact_normalized_match"
+    assert exact_by_id["D3_EXACT_MISMATCH"]["score"] == 0.99
     assert exact_by_id["D3_EXACT_MISMATCH"]["directional_nli"] is None
+
     assert "D2" in exact_by_id
     d2_err = exact_by_id["D2"]
     for key in (
@@ -696,7 +677,13 @@ def test_run_eval_supports_ablation_and_misclassification_diagnostics(tmp_path, 
     for val in dnli.values():
         assert isinstance(val, float) and 0.0 <= val <= 1.0
 
-    # 3. Test nli_only with --diagnostics (even exact matches route to tier2_nli)
+    assert "D4_NLI_MISMATCH" in exact_by_id
+    assert exact_by_id["D4_NLI_MISMATCH"]["origin_tier"] == "tier2_nli"
+    assert exact_by_id["D4_NLI_MISMATCH"]["tier1_reason"] == "non_identical"
+    assert exact_by_id["D4_NLI_MISMATCH"]["error_category"] == "negation_or_antonym"
+    assert isinstance(exact_by_id["D4_NLI_MISMATCH"]["directional_nli"], dict)
+
+    # 2. Test nli_only with --diagnostics (even exact matches route to tier2_nli)
     out_nli = StringIO()
     call_command(
         "run_eval",
@@ -719,7 +706,7 @@ def test_run_eval_supports_ablation_and_misclassification_diagnostics(tmp_path, 
     assert "D2" in nli_by_id
     assert nli_by_id["D2"]["origin_tier"] == "tier2_nli"
 
-    # 4. Test --dataset dev_diagnostic works cleanly with --diagnostics
+    # 3. Test --dataset dev_diagnostic works cleanly with --diagnostics
     out_dd = StringIO()
     call_command(
         "run_eval",
@@ -741,8 +728,9 @@ def test_run_eval_supports_ablation_and_misclassification_diagnostics(tmp_path, 
         cm = mode["confusion_matrix"]
         assert len(mode["misclassifications"]) == cm["fp"] + cm["fn"]
 
-    # 5. Test --model-name scopes local engine; warm_up failure raises CommandError
+    # 4. Test --model-name scopes local engine; warm_up failure raises CommandError
     singleton_before = nli_mod.nli_engine.model_name
+    recorded_kwargs: list[dict[str, object]] = []
 
     class FakeScopedEngine:
         def __init__(self, model_name=None):
@@ -759,11 +747,16 @@ def test_run_eval_supports_ablation_and_misclassification_diagnostics(tmp_path, 
         def score_pairs_batch(
             self,
             pairs,
-            tier1_results,
-            escalation_judge=None,
-            apply_lexical_surface=True,
+            tier1_results=None,
             scoring_mode="mean",
         ):
+            recorded_kwargs.append(
+                {
+                    "count": len(pairs),
+                    "has_tier1": tier1_results is not None,
+                    "scoring_mode": scoring_mode,
+                }
+            )
             return [
                 nli_mod.NLIScoreDetail(
                     score=0.95,
@@ -786,6 +779,8 @@ def test_run_eval_supports_ablation_and_misclassification_diagnostics(tmp_path, 
         str(fixture),
         "--model-name",
         "fake/scoped-nli",
+        "--scoring",
+        "min",
         "--ablation",
         "nli_only",
         "--diagnostics",
@@ -796,6 +791,8 @@ def test_run_eval_supports_ablation_and_misclassification_diagnostics(tmp_path, 
     assert rep_scoped["provenance"]["model_name"] == "fake/scoped-nli"
     assert rep_scoped["provenance"]["model_revision"] == "fake-rev-123"
     assert rep_scoped["model"]["name"] == "fake/scoped-nli"
+    assert recorded_kwargs
+    assert all(call["has_tier1"] and call["scoring_mode"] == "min" for call in recorded_kwargs)
     assert nli_mod.nli_engine.model_name == singleton_before
 
     class FailingEngine(FakeScopedEngine):
@@ -873,6 +870,8 @@ def test_final_holdout_fixture_valid_and_disjoint_by_id_and_text():
         assert source == exp_source
         assert isinstance(it["source_id"], str) and it["source_id"].strip()
         assert isinstance(it["source_label"], str) and it["source_label"].strip()
+        assert isinstance(s1, str) and s1.strip()
+        assert isinstance(s2, str) and s2.strip()
 
         assert is_same_language_pair(s1, s2)
         if lang == "ja":

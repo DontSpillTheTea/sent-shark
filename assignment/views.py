@@ -5,7 +5,6 @@ import uuid
 
 from django.conf import settings
 from django.core.management import call_command
-from django.db import connection
 from django.shortcuts import render
 from django.views.decorators.http import require_GET
 from rest_framework import status, viewsets
@@ -20,10 +19,9 @@ from assignment.serializers import (
     JudgePairSerializer,
 )
 from assignment.services.judge_service import (
-    _SQLITE_WRITE_LOCK,
     judge_bulk,
     judge_single,
-    prune_storage_if_needed,
+    run_sqlite_write,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,14 +57,9 @@ def _record_audit(
             latency_ms=latency_ms,
             rate_limited=rate_limited,
         )
-        prune_storage_if_needed(judgments=False, audit_logs=True)
 
     try:
-        if connection.vendor == "sqlite":
-            with _SQLITE_WRITE_LOCK:
-                _write()
-        else:
-            _write()
+        run_sqlite_write(_write)
     except Exception as exc:
         logger.warning("Failed to write RequestAuditLog: %s", exc)
 

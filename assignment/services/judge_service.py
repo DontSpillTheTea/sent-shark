@@ -1,5 +1,5 @@
 """
-Service layer orchestrating cache lookup, Tier 1/2/3 NLI evaluation, and atomic
+Service layer orchestrating cache lookup, Tier 1/2 NLI evaluation, and atomic
 deduplicated persistence (safe under 30+ parallel writes).
 """
 
@@ -12,16 +12,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from django.conf import settings
-from django.db import IntegrityError, connection, transaction
+from django.db import connection, transaction
 
-from assignment.models import JudgmentRecord, RequestAuditLog
-from assignment.services.nli_engine import (
-    EscalationJudgeProtocol,
-    _validate_scoring_mode,
-    nli_engine,
-)
+from assignment.models import JudgmentRecord
+from assignment.services.nli_engine import _validate_scoring_mode, nli_engine
 from assignment.services.normalizer import Tier1Result, evaluate_tier1, normalize_sentence
 from assignment.types import EntailmentLabel, ScoringMode, TierName
+
+SCORING_POLICY_VERSION = "exact_plus_nli:v1:mean"
 
 # Serialize writes when running on SQLite so 30 concurrent writer threads
 # never collide on SQLite's single-writer file lock. PostgreSQL handles
@@ -31,10 +29,9 @@ _SQLITE_WRITE_LOCK = threading.RLock()
 _HOT_CACHE_MAX_ENTRIES = 2048
 _HOT_CACHE_LOCK = threading.Lock()
 _HOT_CACHE: OrderedDict[str, JudgmentOutput] = OrderedDict()
-_DELETE_BATCH_SIZE = 500
 
 
-def _run_sqlite_write(fn: Callable[[], None]) -> None:
+def run_sqlite_write(fn: Callable[[], None]) -> None:
     """Serialize write operations on SQLite to avoid single-writer lock contention."""
     if connection.vendor == "sqlite":
         with _SQLITE_WRITE_LOCK:
@@ -82,12 +79,13 @@ class SingleflightGroup:
         dict[str, _InflightCall],
         dict[str, _InflightCall],
     ]:
+        unique_keys = list(dict.fromkeys(keys))
         cache_hits: dict[str, JudgmentOutput] = {}
         owned_calls: dict[str, _InflightCall] = {}
         awaited_calls: dict[str, _InflightCall] = {}
 
         with self._lock:
-            for key in keys:
+            for key in unique_keys:
                 if cache_lookup is not None:
                     cached = cache_lookup(key)
                     if cached is not None:
@@ -141,9 +139,6 @@ def _cache_put_many(
     entries: dict[str, JudgmentOutput],
     max_entries: int | None = None,
 ) -> None:
-    if int(getattr(settings, "MAX_STORED_JUDGMENTS", 10000)) <= 0:
-        reset_cache()
-        return
     if not entries:
         return
     limit = _HOT_CACHE_MAX_ENTRIES if max_entries is None else max_entries
@@ -167,106 +162,54 @@ def _cache_put_many(
                 _HOT_CACHE[pair_hash] = cached_out
 
 
-def _cache_evict(pair_hashes: list[str]) -> None:
-    if not pair_hashes:
-        return
-    with _HOT_CACHE_LOCK:
-        for pair_hash in pair_hashes:
-            _HOT_CACHE.pop(pair_hash, None)
-
-
 def reset_cache() -> None:
     """Clear the bounded in-memory hot LRU cache."""
     with _HOT_CACHE_LOCK:
         _HOT_CACHE.clear()
 
 
-def compute_pair_hash(sentence1: str, sentence2: str) -> tuple[str, str, str]:
+def compute_pair_hash(
+    sentence1: str,
+    sentence2: str,
+    model_name: str | None = None,
+    policy_version: str = SCORING_POLICY_VERSION,
+) -> tuple[str, str, str]:
+    """Compute canonical, order-independent, model- and policy-versioned SHA-256 pair hash."""
+    resolved_model = model_name or getattr(
+        settings,
+        "NLI_MODEL_NAME",
+        "MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli",
+    )
     norm1 = normalize_sentence(sentence1)
     norm2 = normalize_sentence(sentence2)
-    digest = hashlib.sha256(f"{norm1}\0{norm2}".encode("utf-8")).hexdigest()
+    a, b = sorted((norm1, norm2))
+    digest = hashlib.sha256(
+        f"{resolved_model}\0{policy_version}\0{a}\0{b}".encode("utf-8")
+    ).hexdigest()
     return digest, norm1, norm2
 
 
-def _prune_table(model_cls, max_rows: int) -> None:
-    """Delete oldest rows by (created_at, id) when table size exceeds max_rows."""
-
-    def _do_prune():
-        if max_rows <= 0:
-            with transaction.atomic():
-                model_cls.objects.all().delete()
-            if model_cls is JudgmentRecord:
-                reset_cache()
-            return
-        if model_cls.objects.count() <= max_rows:
-            return
-        pruned_hashes: list[str] = []
-        with transaction.atomic():
-            keep_qs = model_cls.objects.order_by("-created_at", "-id").values("id")[:max_rows]
-            if model_cls is JudgmentRecord:
-                pruned_rows = list(
-                    model_cls.objects.exclude(id__in=keep_qs).values_list("id", "pair_hash")
-                )
-                pruned_ids = [row_id for row_id, _ in pruned_rows]
-                pruned_hashes = [pair_hash for _, pair_hash in pruned_rows]
-            else:
-                pruned_ids = list(
-                    model_cls.objects.exclude(id__in=keep_qs).values_list("id", flat=True)
-                )
-            for start in range(0, len(pruned_ids), _DELETE_BATCH_SIZE):
-                model_cls.objects.filter(
-                    id__in=pruned_ids[start : start + _DELETE_BATCH_SIZE]
-                ).delete()
-        if model_cls is JudgmentRecord and pruned_hashes:
-            _cache_evict(pruned_hashes)
-
-    _run_sqlite_write(_do_prune)
-
-
-def prune_storage_if_needed(judgments: bool = True, audit_logs: bool = True) -> None:
-    """Enforce bounded storage limits on JudgmentRecord and/or RequestAuditLog."""
-    if not judgments and not audit_logs:
-        return
-
-    def _do_prune():
-        if judgments:
-            max_judgments = int(getattr(settings, "MAX_STORED_JUDGMENTS", 10000))
-            _prune_table(JudgmentRecord, max_judgments)
-        if audit_logs:
-            max_audit_logs = int(getattr(settings, "MAX_AUDIT_LOGS", 50000))
-            _prune_table(RequestAuditLog, max_audit_logs)
-
-    _run_sqlite_write(_do_prune)
-
-
-def _persist_records_safely(records_to_create: list[JudgmentRecord]) -> None:
+def _persist_records_safely(records_to_create: list[JudgmentRecord]) -> dict[str, JudgmentRecord]:
     """
     Persist newly computed JudgmentRecord objects idempotently under concurrent writes.
-    Duplicate pair_hashes created by racing requests are safely ignored.
+    Sorts records deterministically by pair_hash before bulk_create(..., ignore_conflicts=True)
+    and re-checks persisted rows so concurrent writers remain conflict- and deadlock-free.
     """
     if not records_to_create:
-        return
+        return {}
 
-    def _do_write():
-        for rec in records_to_create:
-            try:
-                with transaction.atomic():
-                    JudgmentRecord.objects.get_or_create(
-                        pair_hash=rec.pair_hash,
-                        defaults={
-                            "sentence1": rec.sentence1,
-                            "sentence2": rec.sentence2,
-                            "label": rec.label,
-                            "score": rec.score,
-                            "tier_used": rec.tier_used,
-                            "expected_label": rec.expected_label,
-                        },
-                    )
-            except IntegrityError:
-                # Another concurrent transaction inserted this exact pair_hash first.
-                pass
+    ordered_records = sorted(
+        {rec.pair_hash: rec for rec in records_to_create}.values(),
+        key=lambda rec: rec.pair_hash,
+    )
+    pair_hashes = [rec.pair_hash for rec in ordered_records]
 
-    _run_sqlite_write(_do_write)
+    def _do_write() -> None:
+        with transaction.atomic():
+            JudgmentRecord.objects.bulk_create(ordered_records, ignore_conflicts=True)
+
+    run_sqlite_write(_do_write)
+    return {rec.pair_hash: rec for rec in JudgmentRecord.objects.filter(pair_hash__in=pair_hashes)}
 
 
 def judge_single(sentence1: str, sentence2: str) -> JudgmentOutput:
@@ -276,11 +219,10 @@ def judge_single(sentence1: str, sentence2: str) -> JudgmentOutput:
 
 def evaluate_uncached_pairs(
     pairs: list[tuple[str, str]],
-    escalation_judge: EscalationJudgeProtocol | None = None,
     scoring_mode: ScoringMode = "mean",
 ) -> list[JudgmentOutput]:
     """
-    Pure Tier 1 fast-gate + batched Tier 2/3 NLI evaluation without cache or DB side effects.
+    Pure Tier 1 exact-match gate + batched Tier 2 NLI evaluation without cache or DB side effects.
     Shared by both judge_bulk (after cache/singleflight filtering) and offline evaluation.
     """
     _validate_scoring_mode(scoring_mode)
@@ -305,14 +247,10 @@ def evaluate_uncached_pairs(
     if unresolved_for_tier2:
         nli_inputs = [(s1, s2) for _, s1, s2, _ in unresolved_for_tier2]
         t1_list = [t1 for _, _, _, t1 in unresolved_for_tier2]
-        score_kwargs: dict[str, object] = {"escalation_judge": escalation_judge}
+        score_kwargs: dict[str, object] = {}
         if scoring_mode != "mean":
             score_kwargs["scoring_mode"] = scoring_mode
-        nli_details = nli_engine.score_pairs_batch(
-            nli_inputs,
-            t1_list,
-            **score_kwargs,
-        )
+        nli_details = nli_engine.score_pairs_batch(nli_inputs, t1_list, **score_kwargs)
 
         for (idx, _s1, _s2, _), detail in zip(unresolved_for_tier2, nli_details, strict=True):
             outputs[idx] = JudgmentOutput(
@@ -333,7 +271,7 @@ def evaluate_uncached_pairs(
 def _compute_uncached_pairs(
     owned_pairs: list[tuple[str, str, str]],
 ) -> tuple[dict[str, JudgmentOutput], list[JudgmentRecord]]:
-    """Run Tier 1 fast-gate + batched Tier 2/3 NLI inference for owned uncached pairs."""
+    """Run Tier 1 exact-match gate + batched Tier 2 NLI inference for owned uncached pairs."""
     outputs = evaluate_uncached_pairs([(s1, s2) for _, s1, s2 in owned_pairs])
     owned_results: dict[str, JudgmentOutput] = {}
     new_records: list[JudgmentRecord] = []
@@ -356,10 +294,10 @@ def _compute_uncached_pairs(
 def judge_bulk(pairs: list[tuple[str, str]]) -> list[JudgmentOutput]:
     """
     Judge a batch of up to 100 sentence pairs with:
-    1. In-batch deduplication by canonical SHA-256 pair_hash
+    1. In-batch deduplication by canonical order-independent SHA-256 pair_hash
     2. Bounded in-memory LRU hot cache + single-query DB cache lookup
     3. Per-hash singleflight coalescing across concurrent cold-cache requests
-    4. Tier 1 fast-gate + single batched HuggingFace NLI inference pass
+    4. Tier 1 exact-match gate + single batched HuggingFace NLI inference pass
     5. Concurrency-safe atomic DB persistence
     """
     if not pairs:
@@ -419,10 +357,17 @@ def judge_bulk(pairs: list[tuple[str, str]]) -> list[JudgmentOutput]:
             owned_error: BaseException | None = None
             try:
                 owned_results, new_records = _compute_uncached_pairs(owned_pairs)
-                _persist_records_safely(new_records)
+                persisted_by_hash = _persist_records_safely(new_records)
+                for pair_hash, rec in persisted_by_hash.items():
+                    if pair_hash in owned_results:
+                        owned_results[pair_hash] = JudgmentOutput(
+                            label=rec.label,
+                            score=round(float(rec.score), 4),
+                            tier_used=rec.tier_used,
+                            cached=False,
+                        )
                 if owned_results:
                     _cache_put_many(owned_results)
-                prune_storage_if_needed(judgments=True, audit_logs=False)
                 computed_by_hash.update(owned_results)
             except BaseException as exc:
                 owned_error = exc

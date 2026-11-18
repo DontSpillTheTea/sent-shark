@@ -150,8 +150,13 @@ class TestJudgeAPI:
                 == status.HTTP_404_NOT_FOUND
             )
         assert self.client.get("/api/v1/judge/stats").status_code == status.HTTP_404_NOT_FOUND
+        assert self.client.get("/api/v1/judge/stats/").status_code == status.HTTP_404_NOT_FOUND
         assert (
             self.client.post("/api/v1/judge/evaluate", {"pairs": []}, format="json").status_code
+            == status.HTTP_404_NOT_FOUND
+        )
+        assert (
+            self.client.post("/api/v1/judge/evaluate/", {"pairs": []}, format="json").status_code
             == status.HTTP_404_NOT_FOUND
         )
 
@@ -180,11 +185,12 @@ class TestJudgeAPI:
         settings.NLI_ENABLE_MODEL = False
         resp_entail = self.client.post(
             "/judge",
-            {"sentence1": "私は猫が大好きだ。", "sentence2": "猫が好きです。"},
+            {"sentence1": "私は猫が大好きだ。", "sentence2": "　私は猫が大好きだ！　"},
             format="json",
         )
         assert resp_entail.status_code == status.HTTP_200_OK
         assert resp_entail.data["label"] == "ENTAIL"
+        assert resp_entail.data["score"] == 0.99
 
         resp_contra = self.client.post(
             "/judge",
@@ -193,30 +199,7 @@ class TestJudgeAPI:
         )
         assert resp_contra.status_code == status.HTTP_200_OK
         assert resp_contra.data["label"] == "NO_ENTAIL"
-
-    def test_tier3_escalation_gateway_on_grey_zone_and_timeout_fallback(self):
-        from assignment.services.nli_engine import nli_engine
-        from assignment.services.normalizer import evaluate_tier1
-
-        class MockLLM:
-            def classify(self, sentence1: str, sentence2: str):
-                return ("ENTAIL", 0.88)
-
-        class FailingLLM:
-            def classify(self, sentence1: str, sentence2: str):
-                return None
-
-        # ("She bought a brand new car.", "She purchased a new automobile.") lands in [0.40, 0.65]
-        pair = ("She bought a brand new car.", "She purchased a new automobile.")
-        t1 = [evaluate_tier1(*pair)]
-        escalated = nli_engine.score_pairs_batch([pair], t1, escalation_judge=MockLLM())[0]
-        assert escalated.tier_used == "tier3_llm"
-        assert escalated.label == "ENTAIL"
-        assert escalated.score == 0.88
-
-        fallback = nli_engine.score_pairs_batch([pair], t1, escalation_judge=FailingLLM())[0]
-        assert fallback.tier_used == "tier2_nli"
-        assert fallback.label == "ENTAIL"
+        assert resp_contra.data["score"] == 0.0
 
 
 def test_unknown_nli_id2label_raises_explicit_value_error(monkeypatch, settings):
@@ -225,10 +208,11 @@ def test_unknown_nli_id2label_raises_explicit_value_error(monkeypatch, settings)
     import torch
     import transformers
 
-    from assignment.services.nli_engine import HuggingFaceNLIEngine, NoOpEscalationJudge
+    from assignment.services.nli_engine import HuggingFaceNLIEngine
     from assignment.services.normalizer import evaluate_tier1
 
     current_id2label = {0: "LABEL_0", 1: "LABEL_1", 2: "LABEL_2"}
+    current_num_labels = 3
 
     def fake_tokenizer(
         premises,
@@ -241,10 +225,10 @@ def test_unknown_nli_id2label_raises_explicit_value_error(monkeypatch, settings)
         return {"input_ids": torch.zeros((len(premises), 4), dtype=torch.long)}
 
     class FakeModel:
-        def __init__(self, id2label):
+        def __init__(self, id2label, num_labels):
             self.config = SimpleNamespace(
                 id2label=id2label,
-                num_labels=len(id2label),
+                num_labels=num_labels,
                 _commit_hash="deadbeef1234",
             )
 
@@ -265,7 +249,7 @@ def test_unknown_nli_id2label_raises_explicit_value_error(monkeypatch, settings)
     monkeypatch.setattr(
         transformers.AutoModelForSequenceClassification,
         "from_pretrained",
-        lambda _name: FakeModel(current_id2label),
+        lambda _name: FakeModel(current_id2label, current_num_labels),
     )
 
     pair = ("私は猫が大好きだ。", "猫が好きです。")
@@ -276,30 +260,51 @@ def test_unknown_nli_id2label_raises_explicit_value_error(monkeypatch, settings)
     settings.NLI_CONTRADICT_INDEX = None
     engine = HuggingFaceNLIEngine("mock/unknown-id2label")
     with pytest.raises(ValueError, match="id2label"):
-        engine.score_pairs_batch([pair], t1, escalation_judge=NoOpEscalationJudge())
+        engine.score_pairs_batch([pair], t1)
     with pytest.raises(ValueError, match="id2label"):
-        engine.score_pairs_batch([pair], t1, escalation_judge=NoOpEscalationJudge())
+        engine.score_pairs_batch([pair], t1)
 
-    # 2. Ambiguous id2label ("entailment" + "not_entailment") must raise ValueError
-    current_id2label = {0: "entailment", 1: "not_entailment", 2: "neutral"}
-    ambiguous_engine = HuggingFaceNLIEngine("mock/ambiguous-id2label")
-    with pytest.raises(ValueError):
-        ambiguous_engine.score_pairs_batch([pair], t1, escalation_judge=NoOpEscalationJudge())
+    # 2. Ambiguous / negated id2label ("entailment" + "not_entailment", or "non-contradiction")
+    for bad_map in (
+        {0: "entailment", 1: "not_entailment", 2: "neutral"},
+        {0: "entailment", 1: "non-contradiction"},
+    ):
+        current_id2label = bad_map
+        current_num_labels = len(bad_map)
+        ambiguous_engine = HuggingFaceNLIEngine("mock/ambiguous-id2label")
+        with pytest.raises(ValueError):
+            ambiguous_engine.score_pairs_batch([pair], t1)
 
-    # 3. Invalid override indices (out-of-range, negative, equal, partial) raise ValueError
+    # 3. Inferred index >= num_labels must raise ValueError instead of failing at inference
+    current_id2label = {0: "entailment", 1: "neutral", 2: "contradiction"}
+    current_num_labels = 2
+    oob_engine = HuggingFaceNLIEngine("mock/oob-inferred-id2label")
+    with pytest.raises(ValueError, match="out of range"):
+        oob_engine.score_pairs_batch([pair], t1)
+
+    # 4. Model with non-contradiction + contradiction resolves contradiction cleanly
+    current_id2label = {0: "entailment", 1: "non-contradiction", 2: "contradiction"}
+    current_num_labels = 3
+    clean_engine = HuggingFaceNLIEngine("mock/non-contradiction-plus-contradiction")
+    clean_res = clean_engine.score_pairs_batch([pair], t1)
+    assert len(clean_res) == 1
+    assert clean_res[0].label == "NO_ENTAIL"
+
+    # 5. Invalid override indices (out-of-range, negative, equal, partial) raise ValueError
     current_id2label = {0: "LABEL_0", 1: "LABEL_1", 2: "LABEL_2"}
+    current_num_labels = 3
     for bad_entail, bad_contradict in [(3, 0), (-1, 0), (1, 1), (0, None)]:
         settings.NLI_ENTAIL_INDEX = bad_entail
         settings.NLI_CONTRADICT_INDEX = bad_contradict
         bad_engine = HuggingFaceNLIEngine("mock/invalid-override")
         with pytest.raises(ValueError):
-            bad_engine.score_pairs_batch([pair], t1, escalation_judge=NoOpEscalationJudge())
+            bad_engine.score_pairs_batch([pair], t1)
 
-    # 4. Valid explicit override works and captures model_revision
+    # 6. Valid explicit override works and captures model_revision
     settings.NLI_ENTAIL_INDEX = 2
     settings.NLI_CONTRADICT_INDEX = 0
     override_engine = HuggingFaceNLIEngine("mock/explicit-override")
-    res = override_engine.score_pairs_batch([pair], t1, escalation_judge=NoOpEscalationJudge())
+    res = override_engine.score_pairs_batch([pair], t1)
     assert len(res) == 1
     assert res[0].tier_used == "tier2_nli"
     assert res[0].label == "ENTAIL"

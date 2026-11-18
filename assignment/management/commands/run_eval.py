@@ -9,6 +9,7 @@ import json
 import math
 import os
 import platform
+import shlex
 import subprocess
 import time
 from dataclasses import dataclass
@@ -18,28 +19,23 @@ from typing import Any, Literal
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
+from assignment.services.judge_service import SCORING_POLICY_VERSION
 from assignment.services.nli_engine import (
     NLI_BATCH_SIZE,
-    NLI_CONTRADICT_CAP,
-    NLI_DIRECTIONAL_HIGH,
-    NLI_DIRECTIONAL_LOW,
-    NLI_LEXICAL_CONTRADICT_CAP,
     NLI_MAX_LENGTH,
     HuggingFaceNLIEngine,
     NLIScoreDetail,
-    NoOpEscalationJudge,
     _resolve_hf_model_revision,
     nli_engine,
 )
 from assignment.services.normalizer import (
     Tier1Result,
-    contains_japanese,
     evaluate_tier1,
     normalize_sentence,
 )
 from assignment.types import EntailmentLabel, ScoringMode
 
-AblationMode = Literal["full_hybrid", "exact_plus_nli", "nli_only"]
+AblationMode = Literal["exact_plus_nli", "nli_only"]
 
 FIXTURES_DIR = Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures"
 DEFAULT_GAUNTLET_PATH = FIXTURES_DIR / "eval_gauntlet.json"
@@ -56,9 +52,7 @@ DATASET_PATHS: dict[str, Path] = {
     "final_holdout": DEFAULT_FINAL_HOLDOUT_PATH,
 }
 SCORING_MODES: tuple[ScoringMode, ...] = ("mean", "min")
-ABLATION_MODES: tuple[AblationMode, ...] = ("full_hybrid", "exact_plus_nli", "nli_only")
-
-_NOOP_ESCALATION_JUDGE = NoOpEscalationJudge()
+ABLATION_MODES: tuple[AblationMode, ...] = ("exact_plus_nli", "nli_only")
 
 
 @dataclass(frozen=True)
@@ -129,13 +123,17 @@ def _classify_error_category(item: dict[str, Any]) -> str:
 
     if tag == "caption_codescription" or "codescription" in tag or "caption" in tag:
         return "caption_codescription"
-    if source == "jglue_jnli" and tag in {"bidir_entail", "neutral"}:
+    if tag in {"ja_jnli_bidir_entail", "ja_jnli_neutral"} or (
+        source == "jglue_jnli" and tag in {"bidir_entail", "neutral"}
+    ):
         return "caption_codescription"
 
     if tag in {
         "lexical_synonym_gap",
         "lexical_paraphrase",
         "paraphrase",
+        "ja_paws_paraphrase",
+        "en_paws_paraphrase",
         "bidir_entail",
         "register_shift",
         "pro_drop",
@@ -221,7 +219,7 @@ def _compute_mode_metrics(
     brier_sum = 0.0
     misclassified_ids: list[str] = []
     misclassifications: list[dict[str, Any]] = []
-    has_difficulty = any("difficulty" in item for item in items)
+    has_difficulty = any(item.get("difficulty") is not None for item in items)
     diff_counts: dict[str, dict[str, int]] = (
         {d: {"total": 0, "correct": 0} for d in DIFFICULTIES} if has_difficulty else {}
     )
@@ -243,7 +241,7 @@ def _compute_mode_metrics(
         brier_sum += (prob - y_true) ** 2
         is_correct = pred_label == expected
 
-        if has_difficulty and "difficulty" in item:
+        if has_difficulty and item.get("difficulty") is not None:
             _increment_bucket(diff_counts, item["difficulty"], is_correct)
         _increment_bucket(lang_counts, item["language"], is_correct)
         _increment_bucket(source_counts, _item_source(item), is_correct)
@@ -365,14 +363,6 @@ def _neutral_tier1_result(s1: str, s2: str, reason: str) -> Tier1Result:
     )
 
 
-def _is_exact_normalized_match(s1: str, s2: str) -> tuple[bool, str, str]:
-    """Return (is_exact_match, norm1, norm2) via NFKC + punctuation-trimmed identity."""
-    n1 = normalize_sentence(s1)
-    n2 = normalize_sentence(s2)
-    is_jp = contains_japanese(n1) or contains_japanese(n2)
-    return (n1 == n2 or (not is_jp and n1.lower() == n2.lower())), n1, n2
-
-
 def _run_tier2_mode_with_diagnostics(
     items: list[dict[str, Any]],
     scoring_mode: ScoringMode = "mean",
@@ -387,8 +377,6 @@ def _run_tier2_mode_with_diagnostics(
     batch_details = active_engine.score_pairs_batch(
         pairs,
         neutral_t1,
-        escalation_judge=_NOOP_ESCALATION_JUDGE,
-        apply_lexical_surface=False,
         scoring_mode=scoring_mode,
     )
     total_ms = (time.perf_counter() - batch_start) * 1000.0
@@ -399,8 +387,6 @@ def _run_tier2_mode_with_diagnostics(
         active_engine.score_pairs_batch(
             [pair],
             [t1],
-            escalation_judge=_NOOP_ESCALATION_JUDGE,
-            apply_lexical_surface=False,
             scoring_mode=scoring_mode,
         )
         latencies_ms.append((time.perf_counter() - t0) * 1000.0)
@@ -430,50 +416,15 @@ def _run_tier2_mode(
 
 
 def _hybrid_fast_gate(
-    s1: str, s2: str, ablation: AblationMode
+    s1: str, s2: str
 ) -> tuple[tuple[EntailmentLabel, float] | None, _PairDiagnostic | None, Tier1Result]:
-    """Resolve Tier 1 fast-gate behavior for full_hybrid vs exact_plus_nli ablations."""
-    if ablation == "exact_plus_nli":
-        is_exact, n1, n2 = _is_exact_normalized_match(s1, s2)
-        if is_exact:
-            return (
-                ("ENTAIL", 1.0),
-                _PairDiagnostic(
-                    origin_tier="tier1_exact",
-                    tier1_reason="exact_normalized_match",
-                    directional_nli=None,
-                ),
-                Tier1Result(
-                    decisive=True,
-                    label="ENTAIL",
-                    score=1.0,
-                    reason="exact_normalized_match",
-                    canonical_s1=n1,
-                    canonical_s2=n2,
-                    fallback_score=1.0,
-                ),
-            )
-        return (
-            None,
-            None,
-            Tier1Result(
-                decisive=False,
-                label="NO_ENTAIL",
-                score=0.0,
-                reason="non_identical",
-                canonical_s1=n1,
-                canonical_s2=n2,
-                fallback_score=0.0,
-            ),
-        )
-
+    """Resolve Tier 1 exact-match fast-gate behavior matching production exact_plus_nli."""
     t1 = evaluate_tier1(s1, s2)
     if t1.decisive:
-        origin_tier = "tier1_exact" if t1.reason == "exact_normalized_match" else "tier1_rule"
         return (
             (t1.label, round(float(t1.score), 4)),
             _PairDiagnostic(
-                origin_tier=origin_tier,
+                origin_tier="tier1_exact",
                 tier1_reason=t1.reason,
                 directional_nli=None,
             ),
@@ -485,7 +436,7 @@ def _hybrid_fast_gate(
 def _run_hybrid_mode_with_diagnostics(
     items: list[dict[str, Any]],
     scoring_mode: ScoringMode = "mean",
-    ablation: AblationMode = "full_hybrid",
+    ablation: AblationMode = "exact_plus_nli",
     engine: HuggingFaceNLIEngine | None = None,
 ) -> tuple[list[tuple[EntailmentLabel, float]], list[float], float, list[_PairDiagnostic]]:
     """Evaluate pairs under the selected offline ablation mode and collect diagnostics."""
@@ -496,7 +447,6 @@ def _run_hybrid_mode_with_diagnostics(
         )
 
     pairs = [(item["sentence1"], item["sentence2"]) for item in items]
-    apply_lexical_surface = ablation == "full_hybrid"
 
     predictions: list[tuple[EntailmentLabel, float] | None] = [None] * len(pairs)
     diagnostics: list[_PairDiagnostic | None] = [None] * len(pairs)
@@ -504,7 +454,7 @@ def _run_hybrid_mode_with_diagnostics(
 
     batch_start = time.perf_counter()
     for idx, (s1, s2) in enumerate(pairs):
-        pred, diag, t1_input = _hybrid_fast_gate(s1, s2, ablation)
+        pred, diag, t1_input = _hybrid_fast_gate(s1, s2)
         if pred is not None and diag is not None:
             predictions[idx] = pred
             diagnostics[idx] = diag
@@ -517,8 +467,6 @@ def _run_hybrid_mode_with_diagnostics(
         nli_details = active_engine.score_pairs_batch(
             nli_inputs,
             t1_list,
-            escalation_judge=_NOOP_ESCALATION_JUDGE,
-            apply_lexical_surface=apply_lexical_surface,
             scoring_mode=scoring_mode,
         )
         for (idx, _s1, _s2, t1_input), detail in zip(unresolved, nli_details, strict=True):
@@ -533,13 +481,11 @@ def _run_hybrid_mode_with_diagnostics(
     latencies_ms: list[float] = []
     for s1, s2 in pairs:
         t0 = time.perf_counter()
-        pred, _diag, t1_input = _hybrid_fast_gate(s1, s2, ablation)
+        pred, _diag, t1_input = _hybrid_fast_gate(s1, s2)
         if pred is None:
             active_engine.score_pairs_batch(
                 [(s1, s2)],
                 [t1_input],
-                escalation_judge=_NOOP_ESCALATION_JUDGE,
-                apply_lexical_surface=apply_lexical_surface,
                 scoring_mode=scoring_mode,
             )
         latencies_ms.append((time.perf_counter() - t0) * 1000.0)
@@ -557,10 +503,10 @@ def _run_hybrid_mode_with_diagnostics(
 def _run_hybrid_mode(
     items: list[dict[str, Any]],
     scoring_mode: ScoringMode = "mean",
-    ablation: AblationMode = "full_hybrid",
+    ablation: AblationMode = "exact_plus_nli",
     engine: HuggingFaceNLIEngine | None = None,
 ) -> tuple[list[tuple[EntailmentLabel, float]], list[float], float]:
-    """Evaluate all pairs using Tier 1 fast-gate + Tier 2 batch pipeline."""
+    """Evaluate all pairs using Tier 1 exact-match fast-gate + Tier 2 batch pipeline."""
     preds, latencies_ms, total_ms, _ = _run_hybrid_mode_with_diagnostics(
         items, scoring_mode=scoring_mode, ablation=ablation, engine=engine
     )
@@ -569,7 +515,7 @@ def _run_hybrid_mode(
 
 def _build_dataset_summary(items: list[dict[str, Any]]) -> dict[str, Any]:
     """Summarize pair counts across difficulty, language, labels, source, and stratum."""
-    has_difficulty = any("difficulty" in item for item in items)
+    has_difficulty = any(item.get("difficulty") is not None for item in items)
     by_difficulty = {d: 0 for d in DIFFICULTIES} if has_difficulty else {}
     by_language = {lang: 0 for lang in LANGUAGES}
     by_label = {lbl: 0 for lbl in LABELS}
@@ -577,7 +523,7 @@ def _build_dataset_summary(items: list[dict[str, Any]]) -> dict[str, Any]:
     by_stratum: dict[str, int] = {}
 
     for item in items:
-        if has_difficulty and "difficulty" in item:
+        if has_difficulty and item.get("difficulty") is not None:
             diff = item["difficulty"]
             by_difficulty[diff] = by_difficulty.get(diff, 0) + 1
         lang = item["language"]
@@ -610,10 +556,14 @@ def _resolve_fixture(dataset: str, custom_fixture: str | None) -> tuple[str, Pat
 
 def _load_and_validate_fixture(fixture_path: Path) -> list[dict[str, Any]]:
     """Load and validate an evaluation fixture JSON file, raising CommandError on errors."""
-    if not fixture_path.exists():
+    if not fixture_path.is_file():
         raise CommandError(f"Evaluation gauntlet fixture not found: {fixture_path}")
     try:
-        raw = json.loads(fixture_path.read_text(encoding="utf-8"))
+        raw_text = fixture_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise CommandError(f"Unable to read evaluation fixture {fixture_path}: {exc}") from exc
+    try:
+        raw = json.loads(raw_text)
     except json.JSONDecodeError as exc:
         raise CommandError(f"Invalid JSON in evaluation fixture {fixture_path}: {exc}") from exc
 
@@ -688,11 +638,12 @@ def _format_fixture_path(fixture_path: Path) -> str:
 
 
 def _get_model_revision(model_name: str, engine: HuggingFaceNLIEngine | None = None) -> str:
-    """Resolve model commit revision via loaded engine, AutoConfig, or HF cache snapshot."""
+    """Resolve model commit revision from a matching engine, AutoConfig, or HF cache snapshot."""
     active_engine = engine if engine is not None else nli_engine
-    rev = active_engine.get_model_revision()
-    if rev:
-        return rev
+    if active_engine.model_name == model_name:
+        rev = active_engine.get_model_revision()
+        if rev:
+            return rev
     try:
         from transformers import AutoConfig
 
@@ -737,7 +688,7 @@ def _build_provenance(
     model_name: str,
     threshold: float,
     as_json: bool,
-    ablation: AblationMode = "full_hybrid",
+    ablation: AblationMode = "exact_plus_nli",
     diagnostics: bool = False,
     custom_model_name: str | None = None,
     engine: HuggingFaceNLIEngine | None = None,
@@ -771,18 +722,12 @@ def _build_provenance(
             "batch_size": NLI_BATCH_SIZE,
             "entail_threshold": threshold,
             "entail_margin": None,
-            "contradict_cap": NLI_CONTRADICT_CAP,
-            "lexical_contradict_cap": NLI_LEXICAL_CONTRADICT_CAP,
-            "directional_hypernym_guard": {
-                "max_entail": NLI_DIRECTIONAL_HIGH,
-                "min_entail": NLI_DIRECTIONAL_LOW,
-            },
+            "contradict_cap": None,
             "scoring_mode": scoring_mode,
             "ablation": ablation,
-            "apply_lexical_surface_tier2": False,
-            "apply_lexical_surface_hybrid": ablation == "full_hybrid",
+            "scoring_policy": SCORING_POLICY_VERSION,
         },
-        "command": " ".join(cmd_parts),
+        "command": shlex.join(cmd_parts),
     }
 
 
@@ -838,7 +783,7 @@ def _format_markdown_report(report: dict[str, Any]) -> str:
         (
             f"- **Model:** `{model['name']}` (revision=`{prov['model_revision']}`, "
             f"threshold=`{model['threshold']}`, scoring=`{prov['scoring_mode']}`, "
-            f"ablation=`{prov.get('ablation', 'full_hybrid')}`)"
+            f"ablation=`{prov.get('ablation', 'exact_plus_nli')}`)"
         ),
         (
             f"- **Provenance:** `git_sha={prov['git_sha']}`, `fixture={prov['fixture_path']}`, "
@@ -957,8 +902,8 @@ class Command(BaseCommand):
         parser.add_argument(
             "--ablation",
             choices=ABLATION_MODES,
-            default="full_hybrid",
-            help="Offline hybrid ablation mode ('full_hybrid', 'exact_plus_nli', or 'nli_only').",
+            default="exact_plus_nli",
+            help="Offline hybrid ablation mode ('exact_plus_nli' or 'nli_only').",
         )
         parser.add_argument(
             "--model-name",

@@ -25,11 +25,9 @@ class JudgmentRecord(models.Model):
 
     TIER_RULE = "tier1_rule"
     TIER_NLI = "tier2_nli"
-    TIER_LLM = "tier3_llm"
     TIER_CHOICES = [
         (TIER_RULE, "Tier 1 Deterministic Rule"),
         (TIER_NLI, "Tier 2 NLI Cross-Encoder"),
-        (TIER_LLM, "Tier 3 LLM Escalation"),
     ]
 
     pair_hash = models.CharField(max_length=64, unique=True, db_index=True)
@@ -38,7 +36,6 @@ class JudgmentRecord(models.Model):
     label = models.CharField(max_length=16, choices=LABEL_CHOICES, db_index=True)
     score = models.FloatField()
     tier_used = models.CharField(max_length=32, choices=TIER_CHOICES, default=TIER_NLI)
-    expected_label = models.CharField(max_length=16, choices=LABEL_CHOICES, null=True, blank=True)
     hit_count = models.PositiveIntegerField(default=1)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)

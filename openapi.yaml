@@ -4,8 +4,8 @@ info:
   version: 0.1.0
   description: >
     Determines whether two same-language sentences convey the same meaning (entailment)
-    using a 3-Tier Hybrid NLI Pipeline (Tier 1 Deterministic Linguistic Gate + Tier 2
-    Bidirectional HuggingFace NLI Cross-Encoder + Optional Tier 3 Cloud LLM Escalation).
+    using a 2-Tier Hybrid NLI Pipeline (Tier 1 Exact Normalized Match Gate + Tier 2
+    Bidirectional HuggingFace NLI Cross-Encoder).
     `/judge` and `/judge/bulk` enforce a 5 req/s per-`client_ip` sliding-window rate limit.
 servers:
   - url: http://localhost:8000

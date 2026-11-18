@@ -29,7 +29,6 @@ services:
       POSTGRES_PORT: "5432"
       NLI_MODEL_NAME: ${NLI_MODEL_NAME:-MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli}
       NLI_ENABLE_MODEL: ${NLI_ENABLE_MODEL:-true}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     depends_on:
       db:
         condition: service_healthy

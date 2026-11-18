@@ -110,7 +110,12 @@ AUTH_USER_MODEL = "assignment.User"
 
 def _optional_int_env(name: str) -> int | None:
     raw = os.environ.get(name, "").strip()
-    return int(raw) if raw else None
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got {raw!r}.") from exc
 
 
 # Entailment Judge & Rate Limit Configuration
@@ -119,10 +124,6 @@ NLI_ENABLE_MODEL = os.environ.get("NLI_ENABLE_MODEL", "true").lower() == "true"
 NLI_ENTAIL_INDEX = _optional_int_env("NLI_ENTAIL_INDEX")
 NLI_CONTRADICT_INDEX = _optional_int_env("NLI_CONTRADICT_INDEX")
 ENTAIL_THRESHOLD = float(os.environ.get("ENTAIL_THRESHOLD", "0.50"))
-LLM_ESCALATION_LOW = float(os.environ.get("LLM_ESCALATION_LOW", "0.40"))
-LLM_ESCALATION_HIGH = float(os.environ.get("LLM_ESCALATION_HIGH", "0.65"))
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
 RATE_LIMIT_REQUESTS = int(os.environ.get("RATE_LIMIT_REQUESTS", "5"))
 RATE_LIMIT_WINDOW_SECONDS = float(os.environ.get("RATE_LIMIT_WINDOW_SECONDS", "1.0"))
@@ -134,6 +135,3 @@ TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "false").strip().lower() 
 TRUSTED_PROXY_IPS = [
     ip.strip() for ip in os.getenv("TRUSTED_PROXY_IPS", "").split(",") if ip.strip()
 ]
-
-MAX_STORED_JUDGMENTS = int(os.environ.get("MAX_STORED_JUDGMENTS", "10000"))
-MAX_AUDIT_LOGS = int(os.environ.get("MAX_AUDIT_LOGS", "50000"))

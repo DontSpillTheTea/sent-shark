@@ -1,11 +1,9 @@
 import pytest
 
+from assignment.services import normalizer
 from assignment.services.normalizer import (
-    canonicalize_english,
-    canonicalize_japanese,
     evaluate_tier1,
     is_same_language_pair,
-    normalize_lexical_surface,
     normalize_sentence,
 )
 
@@ -22,199 +20,150 @@ def test_same_language_detection_allows_loanwords_and_rejects_cross_lang():
     assert is_same_language_pair("私は猫が大好きだ。", "I love cats.") is False
 
 
-def test_japanese_canonical_register_and_pronoun_prodrop():
-    c1 = canonicalize_japanese("私は猫が大好きだ。", drop_first_person=True)
-    c2 = canonicalize_japanese("猫が好きです。", drop_first_person=True)
-    assert c1 == c2 == "猫は好き"
+def test_tier1_exact_normalized_match_only_and_non_identical_fallback():
+    res_jp_exact = evaluate_tier1("　私は猫が大好きだ！　", "私は猫が大好きだ。")
+    assert res_jp_exact.decisive is True
+    assert res_jp_exact.label == "ENTAIL"
+    assert res_jp_exact.score == 0.99
+    assert res_jp_exact.reason == "exact_normalized_match"
+    assert res_jp_exact.fallback_score == 0.99
 
-    res = evaluate_tier1("私は猫が大好きだ。", "猫が好きです。")
-    assert res.decisive is True
-    assert res.label == "ENTAIL"
-    assert res.score >= 0.85
+    res_en_exact = evaluate_tier1("Hello,  World!", "hello, world.")
+    assert res_en_exact.decisive is True
+    assert res_en_exact.label == "ENTAIL"
+    assert res_en_exact.score == 0.99
+    assert res_en_exact.reason == "exact_normalized_match"
 
-
-def test_third_person_subjects_do_not_falsely_match():
-    res = evaluate_tier1("私は猫が大好きだ。", "彼は猫が大好きだ。")
-    assert res.decisive is False
-    assert res.fallback_score < 0.50
-
-
-def test_english_contractions_and_article_normalization():
-    assert canonicalize_english("He doesn't like the dog.") == "he does not like dog"
-
-
-def test_antonym_and_negation_contradiction_vetoes():
-    res_en = evaluate_tier1("A cat is a carnivore.", "A cat is a vegetarian.")
-    assert res_en.decisive is True
-    assert res_en.label == "NO_ENTAIL"
-    assert res_en.score <= 0.15
-
-    res_jp = evaluate_tier1("私は猫が大好きだ。", "私は猫が大嫌いだ。")
-    assert res_jp.decisive is True
-    assert res_jp.label == "NO_ENTAIL"
-    assert res_jp.score <= 0.15
-
-    res_neg = evaluate_tier1("私は犬が好きだ。", "私は犬が好きじゃない。")
-    assert res_neg.decisive is True
-    assert res_neg.label == "NO_ENTAIL"
-    assert res_neg.score <= 0.15
+    for s1, s2 in (
+        ("私は猫が大好きだ。", "猫が好きです。"),
+        ("私は猫が大好きだ。", "彼は猫が大好きだ。"),
+        ("A cat is a carnivore.", "A cat is a vegetarian."),
+        ("猫が魚を食べた。", "魚が猫を食べた。"),
+    ):
+        res = evaluate_tier1(s1, s2)
+        assert res.decisive is False
+        assert res.label == "NO_ENTAIL"
+        assert res.score == 0.0
+        assert res.reason == "non_identical"
+        assert res.fallback_score == 0.0
 
 
-def test_japanese_and_english_role_inversion_veto():
-    res_jp = evaluate_tier1("猫が魚を食べた。", "魚が猫を食べた。")
-    assert res_jp.decisive is True
-    assert res_jp.label == "NO_ENTAIL"
-    assert res_jp.score <= 0.10
-
-    res_en = evaluate_tier1("dog chased cat", "cat chased dog")
-    assert res_en.decisive is True
-    assert res_en.label == "NO_ENTAIL"
-    assert res_en.score <= 0.10
-
-
-@pytest.mark.django_db
-def test_synonym_and_temporal_paraphrases_resolve_to_entail():
-    from assignment.services.judge_service import judge_single
-
-    en_res = judge_single("He gave up smoking last year.", "He quit smoking a year ago.")
-    assert en_res.label == "ENTAIL"
-    assert en_res.score >= 0.50
-
-    jp_res = judge_single(
-        "会議は来週の月曜日に延期された。", "ミーティングは来週月曜へ先送りになった。"
-    )
-    assert jp_res.label == "ENTAIL"
-    assert jp_res.score >= 0.50
-
-
-def test_lexical_paraphrase_and_verb_ending_canonicalizations():
-    assert canonicalize_english("She purchased an automobile.") == "she bought car"
-    assert canonicalize_english("The film was extremely dull.") == "movie was very boring"
-    assert canonicalize_english("Do not give up.") == "do not quit"
-
-    assert canonicalize_japanese("電車に乗車しました。") == "電車に乗った"
-    assert canonicalize_japanese("新しい車を購入した。") == "新しい車を買った"
-    assert canonicalize_japanese("会議は終了しました。") == "会議は終わった"
-    assert canonicalize_japanese("ミーティングは先送りされた。") == "会議は延期された"
-    assert canonicalize_japanese("昨日東京へ足を運んだ。") == "昨日東京へ行った"
-    assert canonicalize_japanese("図書館で本を読みました。") == canonicalize_japanese(
-        "図書館で本を読んだ。"
-    )
+def test_removed_tier1_heuristic_helpers_absent():
+    for removed_name in (
+        "canonicalize_japanese",
+        "canonicalize_english",
+        "canonicalize_for_comparison",
+        "normalize_lexical_surface",
+        "_has_antonym_collision",
+        "_has_role_inversion",
+        "_has_jp_voice_inversion",
+    ):
+        assert not hasattr(normalizer, removed_name)
 
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(
-    ("sentence1", "sentence2"),
+    ("sentence1", "sentence2", "expected"),
     [
-        ("I adopted a Siamese cat.", "I adopted an animal."),
-        ("私は柴犬を飼っている。", "私は動物を飼っている。"),
-        ("He gave up smoking last year.", "He started smoking last year."),
-        ("会議は来週の月曜日に延期された。", "会議は今週の金曜日に前倒しされた。"),
-        ("The car is red.", "The automobile is blue."),
+        ("私は猫が大好きだ。", "猫が好きです。", "ENTAIL"),
+        ("The movie was extremely boring.", "The film was very dull.", "ENTAIL"),
+        ("雨が降っているので、傘を持っていく。", "雨天のため、傘を持参する。", "ENTAIL"),
+        ("A cat is a carnivore.", "A cat is a vegetarian.", "NO_ENTAIL"),
+        ("I adopted a Siamese cat.", "I adopted an animal.", "NO_ENTAIL"),
+        ("私は柴犬を飼っている。", "私は動物を飼っている。", "NO_ENTAIL"),
+        ("会議は来週の月曜日に延期された。", "会議は今週の金曜日に前倒しされた。", "NO_ENTAIL"),
+        ("The car is red.", "The automobile is blue.", "NO_ENTAIL"),
+        ("A wolf is a canine.", "A wolf is a dog.", "NO_ENTAIL"),
     ],
 )
-def test_directional_hypernyms_and_lexical_contradictions_remain_no_entail(sentence1, sentence2):
+def test_nli_end_to_end_paraphrases_contradictions_and_hypernyms(sentence1, sentence2, expected):
     from assignment.services.judge_service import judge_single
 
     res = judge_single(sentence1, sentence2)
-    assert res.label == "NO_ENTAIL"
+    assert res.label == expected
 
 
-@pytest.mark.django_db
-def test_passive_vs_active_japanese_voice_not_collapsed_to_entail():
-    from assignment.services.judge_service import judge_single
+def test_nli_batch_deduplicates_identical_and_swapped_directional_pairs(monkeypatch):
+    from assignment.services.nli_engine import nli_engine
 
-    assert canonicalize_japanese("彼が逮捕された。") != canonicalize_japanese("彼が逮捕した。")
-    assert canonicalize_japanese("昨日東京へ行きました。") == "昨日東京へ行った"
-    assert canonicalize_japanese("会議は延期になりました。") == canonicalize_japanese(
-        "会議は延期された。"
-    )
-    assert canonicalize_japanese("イベントは中止になった。") == canonicalize_japanese(
-        "イベントは中止された。"
-    )
+    assert nli_engine.warm_up() is True
+    captured_batches: list[tuple[list[str], list[str]]] = []
+    orig_tokenizer = nli_engine._tokenizer
 
-    t1 = evaluate_tier1("彼が逮捕された。", "彼が逮捕した。")
-    assert not (t1.decisive and t1.label == "ENTAIL")
+    def recording_tokenizer(premises, hypotheses, **kwargs):
+        captured_batches.append((list(premises), list(hypotheses)))
+        return orig_tokenizer(premises, hypotheses, **kwargs)
 
-    res = judge_single("彼が逮捕された。", "彼が逮捕した。")
-    assert res.label == "NO_ENTAIL"
+    monkeypatch.setattr(nli_engine, "_tokenizer", recording_tokenizer)
 
-
-@pytest.mark.django_db
-def test_temporal_a_year_ago_preserves_modifiers_and_no_taxonomic_rewrites():
-    from assignment.services.judge_service import judge_single
-
-    assert "last year" not in canonicalize_english("half a year ago")
-    assert normalize_lexical_surface("He left half a year ago.") == "He left half a year ago"
-    assert canonicalize_english("He left half a year ago.") == "he left half year ago"
-    assert canonicalize_english("He left nearly a year ago.") == "he left nearly year ago"
-    for phrase in (
-        "more than a year ago",
-        "less than a year ago",
-        "just a year ago",
-        "only a year ago",
-        "not a year ago",
-        "It wasn't a year ago.",
-    ):
-        assert "last year" not in normalize_lexical_surface(phrase)
-        assert "last year" not in canonicalize_english(phrase)
-    assert normalize_lexical_surface("A canine was sleeping.") == "A canine was sleeping"
-    assert normalize_lexical_surface("A feline was sleeping.") == "A feline was sleeping"
-    assert canonicalize_english("canine teeth") == "canine teeth"
-    assert canonicalize_english("A canine and a feline.") == "canine and feline"
-    assert judge_single("A wolf is a canine.", "A wolf is a dog.").label == "NO_ENTAIL"
-    assert canonicalize_english("He quit smoking a year ago.") == "he quit smoking last year"
+    s1, s2 = "私は猫が大好きだ。", "猫が好きです。"
+    details = nli_engine.score_pairs_batch([(s1, s2), (s2, s1), (s1, s2)])
+    assert len(details) == 3
+    # Only 2 unique directional sequences (s1->s2 and s2->s1) should be tokenized/inferred
+    assert captured_batches == [
+        (["私は猫が大好きだ", "猫が好きです"], ["猫が好きです", "私は猫が大好きだ"])
+    ]
+    assert details[0].score == details[1].score == details[2].score
+    assert details[0].label == details[1].label == details[2].label == "ENTAIL"
+    assert details[0].forward_entail == details[1].reverse_entail
+    assert details[0].reverse_entail == details[1].forward_entail
 
 
-def test_nli_calibrate_score_guards_surface_contradictions_and_fuses_penalty():
+def test_nli_scoring_mode_validation_and_min_vs_mean(monkeypatch):
+    from types import SimpleNamespace
+
+    import torch
+
     from assignment.services.nli_engine import HuggingFaceNLIEngine
 
-    # Surface contradiction (raw_contra >= 0.35) must block canonical synonym rescue
-    raw_metrics = (0.10, 0.12, 0.45, 0.06)
-    canon_metrics = (0.90, 0.88, 0.02, 0.87)
-    _, _, p_contra, score = HuggingFaceNLIEngine._calibrate_score(
-        raw_metrics, canon_metrics, fallback_score=0.20
-    )
-    assert p_contra == pytest.approx(0.45)
-    assert score == pytest.approx(0.275)
-    assert score < 0.50
+    engine = HuggingFaceNLIEngine("mock/min-vs-mean")
+    with pytest.raises(ValueError, match="Unsupported scoring_mode"):
+        engine.score_pairs_batch([("A", "B")], scoring_mode="max")  # type: ignore[arg-type]
 
-    # Fused else branch must apply (1.0 - max_contra) penalty to averaged directional entailment
-    raw_metrics_else = (0.90, 0.80, 0.05, 0.8075)
-    canon_metrics_else = (0.85, 0.85, 0.30, 0.595)
-    _, _, p_contra_else, score_else = HuggingFaceNLIEngine._calibrate_score(
-        raw_metrics_else, canon_metrics_else, fallback_score=0.50
-    )
-    assert p_contra_else == pytest.approx(0.30)
-    assert score_else == pytest.approx(0.595)
+    monkeypatch.setattr(engine, "_ensure_loaded", lambda: True)
+    engine._entail_idx = 0
+    engine._contradict_idx = 2
+    engine._tokenizer = lambda premises, hypotheses, **_kw: {
+        "input_ids": torch.zeros((len(premises), 2), dtype=torch.long)
+    }
 
-    # Widened directional hypernym guard (< 0.15) must prevent lexical boosting
-    raw_hyp = (0.90, 0.12, 0.02, 0.50)
-    canon_hyp = (0.90, 0.10, 0.02, 0.49)
-    _, _, _, score_hyp = HuggingFaceNLIEngine._calibrate_score(
-        raw_hyp, canon_hyp, fallback_score=0.90
-    )
-    assert score_hyp == pytest.approx(0.4949)
-    assert score_hyp < 0.50
+    # First sequence (A->B): ~0.95 entail; second sequence (B->A): ~0.20 entail
+    probs = torch.tensor([[0.95, 0.04, 0.01], [0.20, 0.78, 0.02]], dtype=torch.float32)
+    monkeypatch.setattr(engine, "_model", lambda **_enc: SimpleNamespace(logits=torch.log(probs)))
+
+    mean_res = engine.score_pairs_batch([("Alpha", "Beta")], scoring_mode="mean")[0]
+    min_res = engine.score_pairs_batch([("Alpha", "Beta")], scoring_mode="min")[0]
+    assert mean_res.label == "ENTAIL"
+    assert min_res.label == "NO_ENTAIL"
+    assert min_res.score < mean_res.score
+
+
+def test_settings_optional_int_env_error_context(monkeypatch):
+    from assignment.settings import _optional_int_env
+
+    monkeypatch.setenv("TEST_NLI_INDEX", "not-an-int")
+    with pytest.raises(ValueError, match="TEST_NLI_INDEX"):
+        _optional_int_env("TEST_NLI_INDEX")
 
 
 @pytest.mark.django_db
 def test_evaluate_uncached_pairs_and_nli_warm_up_without_db_mutation():
     from assignment.models import JudgmentRecord
     from assignment.services.judge_service import evaluate_uncached_pairs
-    from assignment.services.nli_engine import NoOpEscalationJudge, nli_engine
+    from assignment.services.nli_engine import nli_engine
 
     assert JudgmentRecord.objects.count() == 0
     assert nli_engine.warm_up() is True
 
     outputs = evaluate_uncached_pairs(
         [
+            ("　私は猫が大好きだ！　", "私は猫が大好きだ。"),
             ("私は猫が大好きだ。", "猫が好きです。"),
-            ("He gave up smoking last year.", "He quit smoking a year ago."),
-            ("彼が逮捕された。", "彼が逮捕した。"),
-        ],
-        escalation_judge=NoOpEscalationJudge(),
+            ("A cat is a carnivore.", "A cat is a vegetarian."),
+        ]
     )
     assert [out.label for out in outputs] == ["ENTAIL", "ENTAIL", "NO_ENTAIL"]
+    assert [out.tier_used for out in outputs] == ["tier1_rule", "tier2_nli", "tier2_nli"]
+    assert outputs[0].score == 0.99
     assert all(out.cached is False for out in outputs)
     assert JudgmentRecord.objects.count() == 0

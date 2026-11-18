@@ -2,229 +2,110 @@ import pytest
 
 from assignment.models import JudgmentRecord, RequestAuditLog
 from assignment.services import judge_service
-from assignment.services.judge_service import judge_bulk, judge_single, prune_storage_if_needed
-from assignment.views import _record_audit
+from assignment.services.judge_service import judge_bulk, judge_single
 
 
 @pytest.mark.django_db
-def test_judgment_record_has_no_redundant_normalized_columns():
+def test_judgment_record_has_no_redundant_or_removed_columns():
     field_names = {f.name for f in JudgmentRecord._meta.get_fields()}
     assert "normalized_s1" not in field_names
     assert "normalized_s2" not in field_names
+    assert "expected_label" not in field_names
     assert "hit_count" in field_names
 
 
 @pytest.mark.django_db
-def test_bounded_storage_prunes_oldest_records(settings):
-    for i in range(8):
-        judge_single(f"テスト文A{i}です。", f"テスト文A{i}だ。")
-    assert JudgmentRecord.objects.count() == 8
+def test_pair_hash_is_order_independent_and_version_scoped(settings):
+    from assignment.services.judge_service import compute_pair_hash
 
-    settings.MAX_STORED_JUDGMENTS = 5
-    prune_storage_if_needed()
-    assert JudgmentRecord.objects.count() == 5
-    remaining = set(JudgmentRecord.objects.values_list("sentence1", flat=True))
-    assert remaining == {f"テスト文A{i}です。" for i in range(3, 8)}
+    h_ab, _, _ = compute_pair_hash("猫が好きです。", "私は猫が大好きだ。")
+    h_ba, _, _ = compute_pair_hash("私は猫が大好きだ。", "猫が好きです。")
+    assert h_ab == h_ba
 
-
-@pytest.mark.django_db
-def test_bounded_audit_logs_prunes_oldest_records(settings):
-    for i in range(7):
-        RequestAuditLog.objects.create(
-            client_ip=f"10.0.0.{i}",
-            method="POST",
-            path="/judge",
-            status_code=200,
-        )
-    assert RequestAuditLog.objects.count() == 7
-
-    settings.MAX_AUDIT_LOGS = 4
-    prune_storage_if_needed()
-    assert RequestAuditLog.objects.count() == 4
-    remaining_ips = set(RequestAuditLog.objects.values_list("client_ip", flat=True))
-    assert remaining_ips == {f"10.0.0.{i}" for i in range(3, 7)}
+    settings.NLI_MODEL_NAME = "other/nli-model-v2"
+    h_new_model, _, _ = compute_pair_hash("猫が好きです。", "私は猫が大好きだ。")
+    assert h_new_model != h_ab
 
 
 @pytest.mark.django_db
-def test_prune_storage_scoped_flags(settings):
-    for i in range(6):
-        JudgmentRecord.objects.create(
-            pair_hash=f"hash-{i}",
-            sentence1=f"文{i}です。",
-            sentence2=f"文{i}だ。",
-            label=JudgmentRecord.LABEL_ENTAIL,
-            score=0.95,
-            tier_used=JudgmentRecord.TIER_RULE,
-        )
-        RequestAuditLog.objects.create(
-            client_ip=f"10.0.1.{i}",
-            method="GET",
-            path="/judge/stats",
-            status_code=200,
-        )
+def test_pair_hash_policy_version_and_normalization_invariants(settings):
+    from assignment.services.judge_service import SCORING_POLICY_VERSION, compute_pair_hash
 
-    settings.MAX_STORED_JUDGMENTS = 3
-    settings.MAX_AUDIT_LOGS = 3
+    h1, n1, n2 = compute_pair_hash("　猫が好きです！　", "私は猫が大好きだ。")
+    h2, _, _ = compute_pair_hash("私は猫が大好きだ", "猫が好きです")
+    assert (n1, n2) == ("猫が好きです", "私は猫が大好きだ")
+    assert h1 == h2
 
-    prune_storage_if_needed(judgments=True, audit_logs=False)
-    assert JudgmentRecord.objects.count() == 3
-    assert RequestAuditLog.objects.count() == 6
-
-    prune_storage_if_needed(judgments=False, audit_logs=True)
-    assert JudgmentRecord.objects.count() == 3
-    assert RequestAuditLog.objects.count() == 3
+    h_other_policy, _, _ = compute_pair_hash(
+        "猫が好きです。",
+        "私は猫が大好きだ。",
+        policy_version="exact_plus_nli:v2:min",
+    )
+    assert h_other_policy != h1
+    assert SCORING_POLICY_VERSION == "exact_plus_nli:v1:mean"
 
 
 @pytest.mark.django_db
-def test_prune_storage_zero_or_negative_limit_deletes_all(settings):
-    for i in range(3):
-        JudgmentRecord.objects.create(
-            pair_hash=f"zero-hash-{i}",
-            sentence1=f"文Z{i}です。",
-            sentence2=f"文Z{i}だ。",
-            label=JudgmentRecord.LABEL_ENTAIL,
-            score=0.95,
-            tier_used=JudgmentRecord.TIER_RULE,
-        )
-        RequestAuditLog.objects.create(
-            client_ip=f"10.0.2.{i}",
-            method="POST",
-            path="/judge",
-            status_code=200,
-        )
-
-    settings.MAX_STORED_JUDGMENTS = 0
-    settings.MAX_AUDIT_LOGS = -1
-    prune_storage_if_needed()
-
-    assert JudgmentRecord.objects.count() == 0
-    assert RequestAuditLog.objects.count() == 0
-
-
-@pytest.mark.django_db
-def test_persist_and_audit_prune_only_own_table(settings, rf):
-    for i in range(4):
-        JudgmentRecord.objects.create(
-            pair_hash=f"scope-hash-{i}",
-            sentence1=f"文S{i}です。",
-            sentence2=f"文S{i}だ。",
-            label=JudgmentRecord.LABEL_ENTAIL,
-            score=0.95,
-            tier_used=JudgmentRecord.TIER_RULE,
-        )
-        RequestAuditLog.objects.create(
-            client_ip=f"10.0.3.{i}",
-            method="POST",
-            path="/judge",
-            status_code=200,
-        )
-
-    settings.MAX_STORED_JUDGMENTS = 2
-    settings.MAX_AUDIT_LOGS = 2
-
-    # Persisting a judgment should prune JudgmentRecord only, not RequestAuditLog.
-    judge_single("テスト新文Sです。", "テスト新文Sだ。")
-    assert JudgmentRecord.objects.count() == 2
-    assert RequestAuditLog.objects.count() == 4
-
-    # Re-exceed JudgmentRecord limit, then record an audit log.
-    for i in range(2):
-        JudgmentRecord.objects.create(
-            pair_hash=f"extra-hash-{i}",
-            sentence1=f"追加文{i}です。",
-            sentence2=f"追加文{i}だ。",
-            label=JudgmentRecord.LABEL_ENTAIL,
-            score=0.95,
-            tier_used=JudgmentRecord.TIER_RULE,
-        )
-    assert JudgmentRecord.objects.count() == 4
-
-    _record_audit(rf.get("/judge/stats"), client_ip="127.0.0.1", status_code=200, started_at=0.0)
-    assert RequestAuditLog.objects.count() == 2
-    assert JudgmentRecord.objects.count() == 4
-
-
-def test_storage_limits_default_settings(settings):
-    assert settings.MAX_STORED_JUDGMENTS == 10000
-    assert settings.MAX_AUDIT_LOGS == 50000
-
-
-@pytest.mark.django_db
-def test_zero_max_stored_judgments_leaves_db_and_hot_cache_empty(settings):
-    settings.MAX_STORED_JUDGMENTS = 0
-
-    first = judge_single("テストゼロ文です。", "テストゼロ文だ。")
-    assert first.cached is False
-    assert JudgmentRecord.objects.count() == 0
-    assert len(judge_service._HOT_CACHE) == 0
-
-    second = judge_single("テストゼロ文です。", "テストゼロ文だ。")
-    assert second.cached is False
-    assert JudgmentRecord.objects.count() == 0
-    assert len(judge_service._HOT_CACHE) == 0
-
-
-@pytest.mark.django_db
-def test_bulk_exceeding_max_stored_judgments_evicts_pruned_from_hot_cache(settings):
-    settings.MAX_STORED_JUDGMENTS = 1
-    pairs = [(f"テスト一括{i}です。", f"テスト一括{i}だ。") for i in range(3)]
-
-    outputs = judge_bulk(pairs)
-    assert len(outputs) == 3
-    assert all(out.cached is False for out in outputs)
+def test_symmetric_calls_share_single_db_row_and_identical_score(client):
+    s1 = "雨が降っているので、傘を持っていく。"
+    s2 = "雨天のため、傘を持参する。"
+    r1 = client.post(
+        "/judge",
+        data={"sentence1": s1, "sentence2": s2},
+        content_type="application/json",
+        REMOTE_ADDR="198.51.100.201",
+    )
+    r2 = client.post(
+        "/judge",
+        data={"sentence1": s2, "sentence2": s1},
+        content_type="application/json",
+        REMOTE_ADDR="198.51.100.202",
+    )
+    assert r1.status_code == 200 and r2.status_code == 200
+    assert r1.json() == r2.json()
     assert JudgmentRecord.objects.count() == 1
 
-    surviving_hashes = set(JudgmentRecord.objects.values_list("pair_hash", flat=True))
-    assert set(judge_service._HOT_CACHE.keys()) == surviving_hashes
 
-    # The oldest pruned pair must not hit _HOT_CACHE on a subsequent request.
-    recheck = judge_single(*pairs[0])
-    assert recheck.cached is False
+@pytest.mark.django_db
+def test_writes_do_not_prune_judgments_or_audit_logs(client, settings):
+    assert not hasattr(settings, "MAX_STORED_JUDGMENTS")
+    assert not hasattr(settings, "MAX_AUDIT_LOGS")
+    assert not hasattr(judge_service, "prune_storage_if_needed")
+    assert not hasattr(judge_service, "_prune_table")
+
+    pairs = [(f"テスト文P{i}です。", f"テスト文P{i}です。") for i in range(12)]
+    outputs = judge_bulk(pairs)
+    assert len(outputs) == 12
+    assert JudgmentRecord.objects.count() == 12
+
+    for i in range(8):
+        resp = client.post(
+            "/judge",
+            data={"sentence1": f"テスト監査文{i}", "sentence2": f"テスト監査文{i}"},
+            content_type="application/json",
+            REMOTE_ADDR=f"198.51.100.{i + 1}",
+        )
+        assert resp.status_code == 200
+
+    assert JudgmentRecord.objects.count() == 20
+    assert RequestAuditLog.objects.count() == 8
 
 
 @pytest.mark.django_db
-def test_prune_table_handles_more_than_500_deleted_rows(settings):
-    records = [
-        JudgmentRecord(
-            pair_hash=f"batch-hash-{i}",
-            sentence1=f"バッチ文{i}です。",
-            sentence2=f"バッチ文{i}だ。",
-            label=JudgmentRecord.LABEL_ENTAIL,
-            score=0.95,
-            tier_used=JudgmentRecord.TIER_RULE,
-        )
-        for i in range(550)
-    ]
-    JudgmentRecord.objects.bulk_create(records)
-    judge_service._cache_put_many(
-        {
-            rec.pair_hash: judge_service.JudgmentOutput(
-                label=rec.label,
-                score=rec.score,
-                tier_used=rec.tier_used,
-                cached=True,
-            )
-            for rec in records
-        },
-        max_entries=600,
-    )
-    RequestAuditLog.objects.bulk_create(
-        [
-            RequestAuditLog(
-                client_ip=f"10.1.{i // 250}.{i % 250}",
-                method="POST",
-                path="/judge",
-                status_code=200,
-            )
-            for i in range(520)
-        ]
-    )
+def test_symmetric_pair_hits_hot_cache_without_recomputing(monkeypatch):
+    from assignment.services import nli_engine as nli_mod
 
-    settings.MAX_STORED_JUDGMENTS = 10
-    settings.MAX_AUDIT_LOGS = 5
-    prune_storage_if_needed()
+    s1 = "雨が降っているので、傘を持っていく。"
+    s2 = "雨天のため、傘を持参する。"
+    first = judge_single(s1, s2)
+    assert first.cached is False
 
-    assert JudgmentRecord.objects.count() == 10
-    assert RequestAuditLog.objects.count() == 5
-    surviving_hashes = set(JudgmentRecord.objects.values_list("pair_hash", flat=True))
-    assert set(judge_service._HOT_CACHE.keys()) == surviving_hashes
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("NLI inference should not run on symmetric cache hit")
+
+    monkeypatch.setattr(nli_mod.nli_engine, "score_pairs_batch", fail_if_called)
+    second = judge_single(s2, s1)
+    assert second.cached is True
+    assert second.label == first.label
+    assert second.score == first.score
+    assert second.tier_used == first.tier_used

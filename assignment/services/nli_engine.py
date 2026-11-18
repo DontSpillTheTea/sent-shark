@@ -1,38 +1,28 @@
 """
-Tier 2 Bidirectional HuggingFace NLI Cross-Encoder and Tier 3 Optional Cloud LLM
-Escalation Adapter.
+Tier 2 Bidirectional HuggingFace NLI Cross-Encoder.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
+import re
 import threading
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
 
 from django.conf import settings
 
-from assignment.services.normalizer import (
-    Tier1Result,
-    evaluate_tier1,
-    normalize_lexical_surface,
-    normalize_sentence,
-)
+from assignment.services.normalizer import Tier1Result, evaluate_tier1, normalize_sentence
 from assignment.types import EntailmentLabel, ScoringMode, TierName
 
 logger = logging.getLogger(__name__)
 
 NLI_MAX_LENGTH = 256
-NLI_BATCH_SIZE = 64  # 32 directional sentence pairs (64 directional inputs) per pass
-NLI_CONTRADICT_CAP = 0.35
-NLI_LEXICAL_CONTRADICT_CAP = 0.25
-NLI_DIRECTIONAL_HIGH = 0.70
-NLI_DIRECTIONAL_LOW = 0.15
+NLI_BATCH_SIZE = 64  # Up to 64 directional premise/hypothesis sequences per pass
+
+_NEGATED_ENTAIL_RE = re.compile(r"(?:^|[^a-z])(?:non|not|no)[\s_-]*entail")
+_NEGATED_CONTRADICT_RE = re.compile(r"(?:^|[^a-z])(?:non|not|no)[\s_-]*contradict")
 
 
 def _validate_scoring_mode(scoring_mode: ScoringMode) -> None:
@@ -81,83 +71,6 @@ class NLIScoreDetail:
     reverse_contradict: float = 0.0
 
 
-class EscalationJudgeProtocol(Protocol):
-    def classify(self, sentence1: str, sentence2: str) -> tuple[EntailmentLabel, float] | None: ...
-
-
-class NoOpEscalationJudge:
-    """Disable Tier 3 external LLM calls for warm-up and deterministic offline benchmarks."""
-
-    def classify(self, sentence1: str, sentence2: str) -> tuple[EntailmentLabel, float] | None:
-        return None
-
-
-class OpenAIEscalationJudge:
-    """Optional Tier 3 LLM classifier for grey-zone entailment pairs."""
-
-    def __init__(
-        self,
-        api_key: str,
-        model: str = "gpt-4o-mini",
-        timeout_sec: float = 2.0,
-    ):
-        self.api_key = api_key
-        self.model = model
-        self.timeout_sec = timeout_sec
-
-    def classify(self, sentence1: str, sentence2: str) -> tuple[EntailmentLabel, float] | None:
-        if not self.api_key:
-            return None
-
-        payload = {
-            "model": self.model,
-            "temperature": 0.0,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "Determine whether two same-language sentences convey the same "
-                        "meaning (bidirectional entailment). Reply strictly in JSON: "
-                        '{"label": "ENTAIL" or "NO_ENTAIL", "score": float in [0.0, 1.0]}.'
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": f"Sentence 1: {sentence1}\nSentence 2: {sentence2}",
-                },
-            ],
-        }
-        req = urllib.request.Request(
-            "https://api.openai.com/v1/chat/completions",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            content = data["choices"][0]["message"]["content"]
-            parsed = json.loads(content)
-            label = str(parsed.get("label", "")).upper()
-            score = float(parsed.get("score", 0.5))
-            if label == "ENTAIL":
-                return "ENTAIL", max(0.0, min(1.0, score))
-            if label == "NO_ENTAIL":
-                return "NO_ENTAIL", max(0.0, min(1.0, score))
-        except (
-            urllib.error.URLError,
-            TimeoutError,
-            KeyError,
-            ValueError,
-            json.JSONDecodeError,
-        ) as exc:
-            logger.warning("Tier 3 LLM escalation failed; using Tier 2 score: %s", exc)
-        return None
-
-
 class HuggingFaceNLIEngine:
     """
     Singleton wrapper around a pretrained HuggingFace NLI Cross-Encoder.
@@ -194,6 +107,25 @@ class HuggingFaceNLIEngine:
             raise ValueError(f"{setting_name} must be a non-negative integer, got {value!r}.")
         return value
 
+    def _validate_resolved_indices(
+        self,
+        entail_idx: int,
+        contradict_idx: int,
+        num_labels: int | None,
+        source_desc: str,
+    ) -> tuple[int, int]:
+        if entail_idx == contradict_idx or entail_idx < 0 or contradict_idx < 0:
+            raise ValueError(
+                f"Invalid NLI label indices ({entail_idx}, {contradict_idx}) "
+                f"from {source_desc} for model '{self.model_name}'."
+            )
+        if num_labels is not None and (entail_idx >= num_labels or contradict_idx >= num_labels):
+            raise ValueError(
+                f"Resolved NLI label indices ({entail_idx}, {contradict_idx}) "
+                f"out of range for num_labels={num_labels} on model '{self.model_name}'."
+            )
+        return entail_idx, contradict_idx
+
     def _resolve_label_indices(self, model_config) -> tuple[int, int]:
         id2label = getattr(model_config, "id2label", None)
         if not isinstance(id2label, dict):
@@ -227,18 +159,9 @@ class HuggingFaceNLIEngine:
         if entail_override is not None and contradict_override is not None:
             entail_idx = self._parse_override_index(entail_override, "NLI_ENTAIL_INDEX")
             contradict_idx = self._parse_override_index(contradict_override, "NLI_CONTRADICT_INDEX")
-            if entail_idx == contradict_idx:
-                raise ValueError(
-                    f"NLI_ENTAIL_INDEX and NLI_CONTRADICT_INDEX must differ, got {entail_idx}."
-                )
-            if num_labels is not None and (
-                entail_idx >= num_labels or contradict_idx >= num_labels
-            ):
-                raise ValueError(
-                    f"Configured NLI label indices ({entail_idx}, {contradict_idx}) "
-                    f"out of range for num_labels={num_labels} on model '{self.model_name}'."
-                )
-            return entail_idx, contradict_idx
+            return self._validate_resolved_indices(
+                entail_idx, contradict_idx, num_labels, "explicit settings overrides"
+            )
 
         if not id2label:
             raise ValueError(
@@ -255,9 +178,9 @@ class HuggingFaceNLIEngine:
                 raise ValueError(
                     f"Non-integer id2label key {idx_raw!r} on model '{self.model_name}'."
                 ) from exc
-            low = str(lbl).lower()
-            has_entail = "entail" in low
-            has_contradict = "contradict" in low
+            low = str(lbl).strip().lower()
+            has_entail = "entail" in low and not _NEGATED_ENTAIL_RE.search(low)
+            has_contradict = "contradict" in low and not _NEGATED_CONTRADICT_RE.search(low)
             if has_entail and has_contradict:
                 raise ValueError(
                     f"Ambiguous id2label entry {idx}: {lbl!r} on model '{self.model_name}'."
@@ -274,14 +197,12 @@ class HuggingFaceNLIEngine:
                 "Configure NLI_ENTAIL_INDEX and NLI_CONTRADICT_INDEX explicitly."
             )
 
-        entail_idx = entail_matches[0]
-        contradict_idx = contradict_matches[0]
-        if entail_idx == contradict_idx or entail_idx < 0 or contradict_idx < 0:
-            raise ValueError(
-                f"Resolved invalid NLI label indices ({entail_idx}, {contradict_idx}) "
-                f"from id2label={id2label!r} for model '{self.model_name}'."
-            )
-        return entail_idx, contradict_idx
+        return self._validate_resolved_indices(
+            entail_matches[0],
+            contradict_matches[0],
+            num_labels,
+            f"id2label={id2label!r}",
+        )
 
     def _ensure_loaded(self) -> bool:
         if not getattr(settings, "NLI_ENABLE_MODEL", True):
@@ -325,7 +246,7 @@ class HuggingFaceNLIEngine:
                 raise
             except Exception as exc:
                 logger.warning(
-                    "Unable to load NLI model '%s'; falling back to Tier 1 heuristics: %s",
+                    "Unable to load NLI model '%s'; falling back to Tier 1 scores: %s",
                     self.model_name,
                     exc,
                 )
@@ -341,138 +262,33 @@ class HuggingFaceNLIEngine:
         if not self._ensure_loaded():
             return False
         warm_pair = ("warm up sentence", "warm up sentence")
-        self.score_pairs_batch(
-            [warm_pair],
-            [evaluate_tier1(*warm_pair)],
-            escalation_judge=NoOpEscalationJudge(),
-        )
+        self.score_pairs_batch([warm_pair], [evaluate_tier1(*warm_pair)])
         return True
-
-    def _pair_metrics(
-        self,
-        probs_all: list[list[float]],
-        pair_idx: int,
-        scoring_mode: ScoringMode = "mean",
-    ) -> tuple[float, float, float, float]:
-        """Compute forward entailment, reverse entailment, max contradiction, and base score."""
-        fwd = probs_all[2 * pair_idx]
-        rev = probs_all[2 * pair_idx + 1]
-        p_entail_fwd = float(fwd[self._entail_idx])
-        p_entail_rev = float(rev[self._entail_idx])
-        p_contra_max = max(
-            float(fwd[self._contradict_idx]),
-            float(rev[self._contradict_idx]),
-        )
-        entail_signal = _aggregate_entailment(p_entail_fwd, p_entail_rev, scoring_mode)
-        base_score = entail_signal * (1.0 - p_contra_max)
-        return p_entail_fwd, p_entail_rev, p_contra_max, base_score
-
-    def _pair_contradictions(
-        self,
-        probs_all: list[list[float]],
-        pair_idx: int,
-    ) -> tuple[float, float]:
-        """Extract directional (forward, reverse) contradiction probabilities for a pair."""
-        fwd = probs_all[2 * pair_idx]
-        rev = probs_all[2 * pair_idx + 1]
-        return float(fwd[self._contradict_idx]), float(rev[self._contradict_idx])
-
-    @staticmethod
-    def _select_calibration_branch(
-        raw_metrics: tuple[float, float, float, float],
-        canon_metrics: tuple[float, float, float, float] | None,
-    ) -> str:
-        """Select calibration branch ('raw', 'canon', or 'fused') from raw/canonical metrics."""
-        if canon_metrics is None:
-            return "raw"
-        _, _, raw_contra, raw_score = raw_metrics
-        can_fwd, can_rev, can_contra, can_score = canon_metrics
-        if can_contra >= NLI_CONTRADICT_CAP and can_score < raw_score:
-            # Canonicalization exposed a contradiction masked by phrasal variants
-            return "canon"
-        if (
-            can_contra < NLI_DIRECTIONAL_LOW
-            and can_score >= 0.75
-            and min(can_fwd, can_rev) >= 0.50
-            and raw_score < 0.50
-            and raw_contra < NLI_CONTRADICT_CAP
-        ):
-            # Canonicalization resolved lexical synonyms where raw MiniLM misfired
-            return "canon"
-        return "fused"
-
-    @classmethod
-    def _calibrate_score(
-        cls,
-        raw_metrics: tuple[float, float, float, float],
-        canon_metrics: tuple[float, float, float, float] | None,
-        fallback_score: float,
-        scoring_mode: ScoringMode = "mean",
-    ) -> tuple[float, float, float, float]:
-        """
-        Fuse raw and canonical NLI passes and apply non-contradiction lexical calibration.
-        Guards against boosting directional hypernym pairs (strong forward/reverse asymmetry).
-        """
-        _validate_scoring_mode(scoring_mode)
-        branch = cls._select_calibration_branch(raw_metrics, canon_metrics)
-        if branch == "raw" or canon_metrics is None:
-            p_entail_fwd, p_entail_rev, p_contra_max, nli_score = raw_metrics
-        elif branch == "canon":
-            p_entail_fwd, p_entail_rev, p_contra_max, nli_score = canon_metrics
-        else:
-            raw_fwd, raw_rev, raw_contra, _ = raw_metrics
-            can_fwd, can_rev, can_contra, _ = canon_metrics
-            p_entail_fwd = 0.5 * (raw_fwd + can_fwd)
-            p_entail_rev = 0.5 * (raw_rev + can_rev)
-            p_contra_max = max(raw_contra, can_contra)
-            entail_signal = _aggregate_entailment(p_entail_fwd, p_entail_rev, scoring_mode)
-            nli_score = entail_signal * (1.0 - p_contra_max)
-
-        # Strong one-way entailment (e.g., Siamese cat -> animal) must not be boosted
-        is_directional_hypernym = (
-            max(p_entail_fwd, p_entail_rev) >= NLI_DIRECTIONAL_HIGH
-            and min(p_entail_fwd, p_entail_rev) < NLI_DIRECTIONAL_LOW
-        )
-        if not is_directional_hypernym:
-            if p_contra_max < NLI_DIRECTIONAL_LOW and fallback_score >= 0.50:
-                lexical_entail = (1.0 - p_contra_max) * fallback_score
-                nli_score = max(nli_score, 0.50 * nli_score + 0.50 * lexical_entail)
-            elif p_contra_max < NLI_LEXICAL_CONTRADICT_CAP and fallback_score >= 0.65:
-                nli_score = max(nli_score, 0.70 * nli_score + 0.30 * fallback_score)
-
-        return p_entail_fwd, p_entail_rev, p_contra_max, nli_score
 
     def score_pairs_batch(
         self,
         pairs: list[tuple[str, str]],
-        tier1_results: list[Tier1Result],
-        escalation_judge: EscalationJudgeProtocol | None = None,
-        apply_lexical_surface: bool = True,
+        tier1_results: list[Tier1Result] | None = None,
         scoring_mode: ScoringMode = "mean",
     ) -> list[NLIScoreDetail]:
         """
-        Score a batch of sentence pairs using bidirectional NLI inference.
-        Evaluates both normalized surface inputs (applying safe lexical surface
-        normalization when ``apply_lexical_surface=True``, or raw ``normalize_sentence``
-        when ``False``) and canonicalized Tier 1 representations when they differ,
-        then applies non-contradiction calibration.
-        Falls back cleanly to Tier 1 scores if the transformer model is unavailable.
+        Score a batch of sentence pairs using raw normalized bidirectional NLI inference.
+        Deduplicates identical directional (premise, hypothesis) pairs before tokenization,
+        and falls back cleanly to Tier 1 scores if the transformer model is unavailable.
         """
         _validate_scoring_mode(scoring_mode)
         if not pairs:
             return []
 
-        threshold = float(getattr(settings, "ENTAIL_THRESHOLD", 0.50))
-        esc_low = float(getattr(settings, "LLM_ESCALATION_LOW", 0.40))
-        esc_high = float(getattr(settings, "LLM_ESCALATION_HIGH", 0.65))
+        resolved_t1 = (
+            tier1_results
+            if tier1_results is not None
+            else [evaluate_tier1(s1, s2) for s1, s2 in pairs]
+        )
+        if len(resolved_t1) != len(pairs):
+            raise ValueError("tier1_results length must match pairs length.")
 
-        if escalation_judge is None:
-            api_key = getattr(settings, "OPENAI_API_KEY", "")
-            if api_key:
-                escalation_judge = OpenAIEscalationJudge(
-                    api_key=api_key,
-                    model=getattr(settings, "OPENAI_MODEL", "gpt-4o-mini"),
-                )
+        threshold = float(getattr(settings, "ENTAIL_THRESHOLD", 0.50))
 
         if not self._ensure_loaded():
             return [
@@ -486,96 +302,66 @@ class HuggingFaceNLIEngine:
                     forward_contradict=round(1.0 - t1.fallback_score, 4),
                     reverse_contradict=round(1.0 - t1.fallback_score, 4),
                 )
-                for t1 in tier1_results
+                for t1 in resolved_t1
             ]
 
         import torch
 
-        # Build directional inputs for raw normalized pairs and (when distinct) canonical pairs
-        directional_premises: list[str] = []
-        directional_hypotheses: list[str] = []
-        pair_index_map: list[tuple[int, int | None]] = []
+        unique_dir_pairs: list[tuple[str, str]] = []
+        dir_index_by_pair: dict[tuple[str, str], int] = {}
+        pair_dir_indices: list[tuple[int, int]] = []
 
-        surface_fn = normalize_lexical_surface if apply_lexical_surface else normalize_sentence
-        for (s1, s2), t1 in zip(pairs, tier1_results, strict=True):
-            n1 = surface_fn(s1)
-            n2 = surface_fn(s2)
-            raw_idx = len(directional_premises) // 2
-            directional_premises.extend((n1, n2))
-            directional_hypotheses.extend((n2, n1))
-
-            c1 = (t1.canonical_s1 or n1).replace("<SELF>", "私") or n1
-            c2 = (t1.canonical_s2 or n2).replace("<SELF>", "私") or n2
-            if (c1, c2) != (n1, n2):
-                canon_idx = len(directional_premises) // 2
-                directional_premises.extend((c1, c2))
-                directional_hypotheses.extend((c2, c1))
-            else:
-                canon_idx = None
-
-            pair_index_map.append((raw_idx, canon_idx))
+        for s1, s2 in pairs:
+            n1 = normalize_sentence(s1)
+            n2 = normalize_sentence(s2)
+            fwd_key = (n1, n2)
+            rev_key = (n2, n1)
+            fwd_idx = dir_index_by_pair.get(fwd_key)
+            if fwd_idx is None:
+                fwd_idx = len(unique_dir_pairs)
+                dir_index_by_pair[fwd_key] = fwd_idx
+                unique_dir_pairs.append(fwd_key)
+            rev_idx = dir_index_by_pair.get(rev_key)
+            if rev_idx is None:
+                rev_idx = len(unique_dir_pairs)
+                dir_index_by_pair[rev_key] = rev_idx
+                unique_dir_pairs.append(rev_key)
+            pair_dir_indices.append((fwd_idx, rev_idx))
 
         probs_all: list[list[float]] = []
         with torch.inference_mode():
-            for start in range(0, len(directional_premises), NLI_BATCH_SIZE):
-                end = start + NLI_BATCH_SIZE
+            for start in range(0, len(unique_dir_pairs), NLI_BATCH_SIZE):
+                chunk = unique_dir_pairs[start : start + NLI_BATCH_SIZE]
                 encoded = self._tokenizer(
-                    directional_premises[start:end],
-                    directional_hypotheses[start:end],
+                    [p for p, _ in chunk],
+                    [h for _, h in chunk],
                     padding=True,
                     truncation=True,
                     max_length=NLI_MAX_LENGTH,
                     return_tensors="pt",
                 )
                 logits = self._model(**encoded).logits
-                probs = torch.softmax(logits, dim=-1).tolist()
-                probs_all.extend(probs)
+                probs_all.extend(torch.softmax(logits, dim=-1).tolist())
 
         results: list[NLIScoreDetail] = []
-        for (s1, s2), t1, (raw_idx, canon_idx) in zip(
-            pairs, tier1_results, pair_index_map, strict=True
-        ):
-            raw_metrics = self._pair_metrics(probs_all, raw_idx, scoring_mode=scoring_mode)
-            canon_metrics = (
-                self._pair_metrics(probs_all, canon_idx, scoring_mode=scoring_mode)
-                if canon_idx is not None
-                else None
-            )
-            p_entail_fwd, p_entail_rev, p_contra_max, nli_score = self._calibrate_score(
-                raw_metrics,
-                canon_metrics,
-                t1.fallback_score,
-                scoring_mode=scoring_mode,
-            )
-            raw_contra_fwd, raw_contra_rev = self._pair_contradictions(probs_all, raw_idx)
-            if canon_idx is None:
-                p_contra_fwd, p_contra_rev = raw_contra_fwd, raw_contra_rev
-            else:
-                can_contra_fwd, can_contra_rev = self._pair_contradictions(probs_all, canon_idx)
-                branch = self._select_calibration_branch(raw_metrics, canon_metrics)
-                if branch == "canon":
-                    p_contra_fwd, p_contra_rev = can_contra_fwd, can_contra_rev
-                else:
-                    p_contra_fwd = max(raw_contra_fwd, can_contra_fwd)
-                    p_contra_rev = max(raw_contra_rev, can_contra_rev)
-
+        for fwd_idx, rev_idx in pair_dir_indices:
+            fwd = probs_all[fwd_idx]
+            rev = probs_all[rev_idx]
+            p_entail_fwd = float(fwd[self._entail_idx])
+            p_entail_rev = float(rev[self._entail_idx])
+            p_contra_fwd = float(fwd[self._contradict_idx])
+            p_contra_rev = float(rev[self._contradict_idx])
+            p_contra_max = max(p_contra_fwd, p_contra_rev)
+            entail_signal = _aggregate_entailment(p_entail_fwd, p_entail_rev, scoring_mode)
+            nli_score = entail_signal * (1.0 - p_contra_max)
             score = round(max(0.0, min(1.0, nli_score)), 4)
             label: EntailmentLabel = "ENTAIL" if score >= threshold else "NO_ENTAIL"
-            tier_used: TierName = "tier2_nli"
-
-            # Optional Tier 3 LLM escalation in uncertain grey zone
-            if escalation_judge is not None and esc_low <= score <= esc_high:
-                escalated = escalation_judge.classify(s1, s2)
-                if escalated is not None:
-                    label, esc_score = escalated
-                    score = round(esc_score, 4)
-                    tier_used = "tier3_llm"
 
             results.append(
                 NLIScoreDetail(
                     score=score,
                     label=label,
-                    tier_used=tier_used,
+                    tier_used="tier2_nli",
                     forward_entail=round(p_entail_fwd, 4),
                     reverse_entail=round(p_entail_rev, 4),
                     max_contradiction=round(p_contra_max, 4),
