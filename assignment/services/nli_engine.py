@@ -22,6 +22,7 @@ from assignment.services.normalizer import (
     normalize_lexical_surface,
     normalize_sentence,
 )
+from assignment.types import EntailmentLabel, TierName
 
 logger = logging.getLogger(__name__)
 
@@ -29,21 +30,21 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class NLIScoreDetail:
     score: float
-    label: str
-    tier_used: str
+    label: EntailmentLabel
+    tier_used: TierName
     forward_entail: float
     reverse_entail: float
     max_contradiction: float
 
 
 class EscalationJudgeProtocol(Protocol):
-    def classify(self, sentence1: str, sentence2: str) -> tuple[str, float] | None: ...
+    def classify(self, sentence1: str, sentence2: str) -> tuple[EntailmentLabel, float] | None: ...
 
 
 class NoOpEscalationJudge:
     """Disable Tier 3 external LLM calls for warm-up and deterministic offline benchmarks."""
 
-    def classify(self, sentence1: str, sentence2: str) -> tuple[str, float] | None:
+    def classify(self, sentence1: str, sentence2: str) -> tuple[EntailmentLabel, float] | None:
         return None
 
 
@@ -60,7 +61,7 @@ class OpenAIEscalationJudge:
         self.model = model
         self.timeout_sec = timeout_sec
 
-    def classify(self, sentence1: str, sentence2: str) -> tuple[str, float] | None:
+    def classify(self, sentence1: str, sentence2: str) -> tuple[EntailmentLabel, float] | None:
         if not self.api_key:
             return None
 
@@ -98,8 +99,10 @@ class OpenAIEscalationJudge:
             parsed = json.loads(content)
             label = str(parsed.get("label", "")).upper()
             score = float(parsed.get("score", 0.5))
-            if label in ("ENTAIL", "NO_ENTAIL"):
-                return label, max(0.0, min(1.0, score))
+            if label == "ENTAIL":
+                return "ENTAIL", max(0.0, min(1.0, score))
+            if label == "NO_ENTAIL":
+                return "NO_ENTAIL", max(0.0, min(1.0, score))
         except (
             urllib.error.URLError,
             TimeoutError,
@@ -367,8 +370,8 @@ class HuggingFaceNLIEngine:
             )
 
             score = round(max(0.0, min(1.0, nli_score)), 4)
-            label = "ENTAIL" if score >= threshold else "NO_ENTAIL"
-            tier_used = "tier2_nli"
+            label: EntailmentLabel = "ENTAIL" if score >= threshold else "NO_ENTAIL"
+            tier_used: TierName = "tier2_nli"
 
             # Optional Tier 3 LLM escalation in uncertain grey zone
             if escalation_judge is not None and esc_low <= score <= esc_high:

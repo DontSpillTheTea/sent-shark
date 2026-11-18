@@ -9,6 +9,8 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
+from assignment.types import EntailmentLabel
+
 # Script detection regexes
 _KANA_RE = re.compile(r"[\u3040-\u309f\u30a0-\u30ff]")
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
@@ -203,7 +205,7 @@ _JP_VOICE_ACTIVE_RE = re.compile(r"^(.*?)([一-龥ァ-ヶー]+)(?:し(?:た|て�
 @dataclass(frozen=True)
 class Tier1Result:
     decisive: bool
-    label: str
+    label: EntailmentLabel
     score: float
     reason: str
     canonical_s1: str

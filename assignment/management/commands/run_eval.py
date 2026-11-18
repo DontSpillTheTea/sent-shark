@@ -16,13 +16,14 @@ from django.core.management.base import BaseCommand, CommandError
 from assignment.services.judge_service import evaluate_uncached_pairs
 from assignment.services.nli_engine import NoOpEscalationJudge, nli_engine
 from assignment.services.normalizer import Tier1Result, evaluate_tier1, normalize_sentence
+from assignment.types import EntailmentLabel
 
 DEFAULT_GAUNTLET_PATH = (
     Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures" / "eval_gauntlet.json"
 )
 DIFFICULTIES = ("easy", "medium", "hard", "edge")
 LANGUAGES = ("ja", "en")
-LABELS = ("ENTAIL", "NO_ENTAIL")
+LABELS: tuple[EntailmentLabel, ...] = ("ENTAIL", "NO_ENTAIL")
 
 _NOOP_ESCALATION_JUDGE = NoOpEscalationJudge()
 
@@ -54,7 +55,7 @@ def _compute_latency_stats(latencies_ms: list[float], total_ms: float) -> dict[s
 
 def _compute_mode_metrics(
     items: list[dict[str, Any]],
-    predictions: list[tuple[str, float]],
+    predictions: list[tuple[EntailmentLabel, float]],
     latencies_ms: list[float],
     total_ms: float,
 ) -> dict[str, Any]:
@@ -117,9 +118,9 @@ def _compute_mode_metrics(
 
 def _run_tier1_mode(
     items: list[dict[str, Any]], threshold: float
-) -> tuple[list[tuple[str, float]], list[float], float]:
+) -> tuple[list[tuple[EntailmentLabel, float]], list[float], float]:
     """Evaluate all pairs using Tier 1 deterministic rules and fallback score only."""
-    predictions: list[tuple[str, float]] = []
+    predictions: list[tuple[EntailmentLabel, float]] = []
     latencies_ms: list[float] = []
 
     batch_start = time.perf_counter()
@@ -127,7 +128,9 @@ def _run_tier1_mode(
         t0 = time.perf_counter()
         t1 = evaluate_tier1(item["sentence1"], item["sentence2"])
         prob = float(t1.score if t1.decisive else t1.fallback_score)
-        label = t1.label if t1.decisive else ("ENTAIL" if prob >= threshold else "NO_ENTAIL")
+        label: EntailmentLabel = (
+            t1.label if t1.decisive else ("ENTAIL" if prob >= threshold else "NO_ENTAIL")
+        )
         latencies_ms.append((time.perf_counter() - t0) * 1000.0)
         predictions.append((label, prob))
     total_ms = (time.perf_counter() - batch_start) * 1000.0
@@ -136,7 +139,7 @@ def _run_tier1_mode(
 
 def _run_tier2_mode(
     items: list[dict[str, Any]],
-) -> tuple[list[tuple[str, float]], list[float], float]:
+) -> tuple[list[tuple[EntailmentLabel, float]], list[float], float]:
     """Evaluate all pairs using raw Tier 2 NLI cross-encoder without Tier 1 rules."""
     pairs = [(item["sentence1"], item["sentence2"]) for item in items]
     neutral_t1 = [
@@ -178,7 +181,7 @@ def _run_tier2_mode(
 
 def _run_hybrid_mode(
     items: list[dict[str, Any]],
-) -> tuple[list[tuple[str, float]], list[float], float]:
+) -> tuple[list[tuple[EntailmentLabel, float]], list[float], float]:
     """Evaluate all pairs using judge_service's Tier 1 fast-gate + Tier 2 batch pipeline."""
     pairs = [(item["sentence1"], item["sentence2"]) for item in items]
 

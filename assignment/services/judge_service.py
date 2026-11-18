@@ -18,6 +18,7 @@ from django.db.models import Avg, Count
 from assignment.models import JudgmentRecord, RequestAuditLog
 from assignment.services.nli_engine import EscalationJudgeProtocol, nli_engine
 from assignment.services.normalizer import Tier1Result, evaluate_tier1, normalize_sentence
+from assignment.types import EntailmentLabel, TierName
 
 # Serialize writes when running on SQLite so 30 concurrent writer threads
 # never collide on SQLite's single-writer file lock. PostgreSQL handles
@@ -41,9 +42,9 @@ def _run_sqlite_write(fn: Callable[[], None]) -> None:
 
 @dataclass(frozen=True)
 class JudgmentOutput:
-    label: str
+    label: EntailmentLabel
     score: float
-    tier_used: str
+    tier_used: TierName
     cached: bool
 
 
@@ -487,7 +488,7 @@ def compute_stats() -> dict:
     }
 
 
-def _update_expected_labels(updates: list[tuple[str, str]]) -> None:
+def _update_expected_labels(updates: list[tuple[str, EntailmentLabel]]) -> None:
     """Persist ground-truth expected_label annotations safely on SQLite and Postgres."""
     if not updates:
         return
@@ -501,7 +502,7 @@ def _update_expected_labels(updates: list[tuple[str, str]]) -> None:
 
 
 def evaluate_ground_truth(
-    labeled_pairs: list[tuple[str, str, str]],
+    labeled_pairs: list[tuple[str, str, EntailmentLabel]],
 ) -> dict:
     """
     Evaluate predicted entailment labels against ground-truth expected labels and
@@ -512,7 +513,7 @@ def evaluate_ground_truth(
 
     tp = fp = tn = fn = 0
     results = []
-    expected_updates: list[tuple[str, str]] = []
+    expected_updates: list[tuple[str, EntailmentLabel]] = []
 
     for (s1, s2, expected), pred in zip(labeled_pairs, predictions, strict=True):
         pair_hash, _, _ = compute_pair_hash(s1, s2)
