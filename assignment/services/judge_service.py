@@ -40,35 +40,37 @@ def compute_pair_hash(sentence1: str, sentence2: str) -> tuple[str, str, str]:
 
 def _prune_table(model_cls, max_rows: int) -> None:
     """Delete oldest rows by (created_at, id) when table size exceeds max_rows."""
-    if max_rows < 0:
-        return
-    total = model_cls.objects.count()
-    if total <= max_rows:
-        return
-    if max_rows == 0:
-        model_cls.objects.all().delete()
-        return
-
-    excess = total - max_rows
-    while excess > 0:
-        batch_size = min(excess, 500)
-        oldest_ids = list(
-            model_cls.objects.order_by("created_at", "id").values_list("id", flat=True)[:batch_size]
-        )
-        if not oldest_ids:
-            break
-        model_cls.objects.filter(id__in=oldest_ids).delete()
-        excess -= len(oldest_ids)
-
-
-def prune_storage_if_needed() -> None:
-    """Enforce bounded storage limits on JudgmentRecord and RequestAuditLog."""
-    max_judgments = int(getattr(settings, "MAX_STORED_JUDGMENTS", 10000))
-    max_audit_logs = int(getattr(settings, "MAX_AUDIT_LOGS", 50000))
 
     def _do_prune():
-        _prune_table(JudgmentRecord, max_judgments)
-        _prune_table(RequestAuditLog, max_audit_logs)
+        if max_rows <= 0:
+            with transaction.atomic():
+                model_cls.objects.all().delete()
+            return
+        if model_cls.objects.count() <= max_rows:
+            return
+        with transaction.atomic():
+            keep_qs = model_cls.objects.order_by("-created_at", "-id").values("id")[:max_rows]
+            model_cls.objects.exclude(id__in=keep_qs).delete()
+
+    if connection.vendor == "sqlite":
+        with _SQLITE_WRITE_LOCK:
+            _do_prune()
+    else:
+        _do_prune()
+
+
+def prune_storage_if_needed(judgments: bool = True, audit_logs: bool = True) -> None:
+    """Enforce bounded storage limits on JudgmentRecord and/or RequestAuditLog."""
+    if not judgments and not audit_logs:
+        return
+
+    def _do_prune():
+        if judgments:
+            max_judgments = int(getattr(settings, "MAX_STORED_JUDGMENTS", 10000))
+            _prune_table(JudgmentRecord, max_judgments)
+        if audit_logs:
+            max_audit_logs = int(getattr(settings, "MAX_AUDIT_LOGS", 50000))
+            _prune_table(RequestAuditLog, max_audit_logs)
 
     if connection.vendor == "sqlite":
         with _SQLITE_WRITE_LOCK:
@@ -84,8 +86,6 @@ def _persist_records_safely(records_to_create: list[JudgmentRecord]) -> None:
     """
     if not records_to_create:
         return
-
-    max_judgments = int(getattr(settings, "MAX_STORED_JUDGMENTS", 10000))
 
     def _do_write():
         for rec in records_to_create:
@@ -105,7 +105,7 @@ def _persist_records_safely(records_to_create: list[JudgmentRecord]) -> None:
             except IntegrityError:
                 # Another concurrent transaction inserted this exact pair_hash first.
                 pass
-        _prune_table(JudgmentRecord, max_judgments)
+        prune_storage_if_needed(judgments=True, audit_logs=False)
 
     if connection.vendor == "sqlite":
         with _SQLITE_WRITE_LOCK:
@@ -131,13 +131,13 @@ def judge_bulk(pairs: list[tuple[str, str]]) -> list[JudgmentOutput]:
     if not pairs:
         return []
 
-    hashed_items: list[tuple[str, str, str, str, str]] = []
+    hashed_items: list[tuple[str, str, str]] = []
     unique_hashes: list[str] = []
     seen_hashes: set[str] = set()
 
     for s1, s2 in pairs:
-        pair_hash, norm1, norm2 = compute_pair_hash(s1, s2)
-        hashed_items.append((pair_hash, s1, s2, norm1, norm2))
+        pair_hash, _, _ = compute_pair_hash(s1, s2)
+        hashed_items.append((pair_hash, s1, s2))
         if pair_hash not in seen_hashes:
             seen_hashes.add(pair_hash)
             unique_hashes.append(pair_hash)
@@ -156,10 +156,10 @@ def judge_bulk(pairs: list[tuple[str, str]]) -> list[JudgmentOutput]:
         )
 
     # Evaluate unique uncached pairs
-    unresolved_for_tier2: list[tuple[str, str, str, str, str, object]] = []
+    unresolved_for_tier2: list[tuple[str, str, str, object]] = []
     new_records: list[JudgmentRecord] = []
 
-    for pair_hash, s1, s2, norm1, norm2 in hashed_items:
+    for pair_hash, s1, s2 in hashed_items:
         if pair_hash in computed_by_hash:
             continue
 
@@ -186,14 +186,14 @@ def judge_bulk(pairs: list[tuple[str, str]]) -> list[JudgmentOutput]:
             # Mark placeholder in computed_by_hash only after batch NLI completes;
             # prevent double-queuing identical hashes within the same bulk request
             if not any(item[0] == pair_hash for item in unresolved_for_tier2):
-                unresolved_for_tier2.append((pair_hash, s1, s2, norm1, norm2, t1))
+                unresolved_for_tier2.append((pair_hash, s1, s2, t1))
 
     if unresolved_for_tier2:
         nli_inputs = [(item[1], item[2]) for item in unresolved_for_tier2]
-        t1_list = [item[5] for item in unresolved_for_tier2]
+        t1_list = [item[3] for item in unresolved_for_tier2]
         nli_details = nli_engine.score_pairs_batch(nli_inputs, t1_list)
 
-        for (pair_hash, s1, s2, norm1, norm2, _), detail in zip(unresolved_for_tier2, nli_details):
+        for (pair_hash, s1, s2, _), detail in zip(unresolved_for_tier2, nli_details):
             out = JudgmentOutput(
                 label=detail.label,
                 score=round(detail.score, 4),
@@ -214,7 +214,7 @@ def judge_bulk(pairs: list[tuple[str, str]]) -> list[JudgmentOutput]:
 
     _persist_records_safely(new_records)
 
-    return [computed_by_hash[pair_hash] for pair_hash, _, _, _, _ in hashed_items]
+    return [computed_by_hash[pair_hash] for pair_hash, _, _ in hashed_items]
 
 
 def compute_stats() -> dict:

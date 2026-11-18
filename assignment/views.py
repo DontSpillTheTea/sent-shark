@@ -49,7 +49,7 @@ def _record_audit(
             latency_ms=latency_ms,
             rate_limited=rate_limited,
         )
-        prune_storage_if_needed()
+        prune_storage_if_needed(judgments=False, audit_logs=True)
 
     try:
         if connection.vendor == "sqlite":
