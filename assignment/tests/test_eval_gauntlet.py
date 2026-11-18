@@ -1,3 +1,4 @@
+import hashlib
 import json
 from io import StringIO
 from pathlib import Path
@@ -18,6 +19,10 @@ GAUNTLET_PATH = Path(__file__).resolve().parent / "fixtures" / "eval_gauntlet.js
 HOLDOUT_PATH = Path(__file__).resolve().parent / "fixtures" / "eval_holdout.json"
 HOLDOUT_PROVENANCE_PATH = (
     Path(__file__).resolve().parent / "fixtures" / "eval_holdout_provenance.json"
+)
+FINAL_HOLDOUT_PATH = Path(__file__).resolve().parent / "fixtures" / "eval_final_holdout.json"
+FINAL_PROVENANCE_PATH = (
+    Path(__file__).resolve().parent / "fixtures" / "eval_final_holdout_provenance.json"
 )
 REQUIRED_KEYS = {
     "id",
@@ -46,6 +51,16 @@ HOLDOUT_EXPECTED_STRATA = {
     "neutral": (6, "ja", "NO_ENTAIL"),
     "paraphrase": (10, "en", "ENTAIL"),
     "adversarial_swap": (10, "en", "NO_ENTAIL"),
+}
+FINAL_HOLDOUT_EXPECTED_STRATA = {
+    "ja_paws_paraphrase": (40, "ja", "ENTAIL", "paws_x_ja"),
+    "ja_paws_swap": (40, "ja", "NO_ENTAIL", "paws_x_ja"),
+    "en_paws_paraphrase": (20, "en", "ENTAIL", "paws_x_en"),
+    "en_paws_swap": (20, "en", "NO_ENTAIL", "paws_x_en"),
+    "ja_jnli_bidir_entail": (29, "ja", "ENTAIL", "jglue_jnli"),
+    "ja_jnli_oneway": (10, "ja", "NO_ENTAIL", "jglue_jnli"),
+    "ja_jnli_contradict": (10, "ja", "NO_ENTAIL", "jglue_jnli"),
+    "ja_jnli_neutral": (9, "ja", "NO_ENTAIL", "jglue_jnli"),
 }
 DIFFICULTIES = ("easy", "medium", "hard", "edge")
 
@@ -790,3 +805,143 @@ def test_run_eval_supports_ablation_and_misclassification_diagnostics(tmp_path, 
     monkeypatch.setattr(run_eval_cmd, "HuggingFaceNLIEngine", FailingEngine)
     with pytest.raises(CommandError, match="warm up"):
         call_command("run_eval", "--fixture", str(fixture), "--model-name", "fake/broken-nli")
+
+
+def test_final_holdout_fixture_valid_and_disjoint_by_id_and_text():
+    assert FINAL_HOLDOUT_PATH.exists(), f"Missing final holdout fixture: {FINAL_HOLDOUT_PATH}"
+    assert FINAL_PROVENANCE_PATH.exists(), (
+        f"Missing final holdout provenance: {FINAL_PROVENANCE_PATH}"
+    )
+
+    raw_bytes = FINAL_HOLDOUT_PATH.read_bytes()
+    items = json.loads(raw_bytes.decode("utf-8"))
+    prov = json.loads(FINAL_PROVENANCE_PATH.read_text(encoding="utf-8"))
+    dev_items = json.loads(GAUNTLET_PATH.read_text(encoding="utf-8"))
+    diag_items = json.loads(HOLDOUT_PATH.read_text(encoding="utf-8"))
+
+    assert len(items) == 178
+    assert [it["id"] for it in items] == [f"F{i:03d}" for i in range(1, 179)]
+    assert prov["total_pairs"] == len(items)
+    assert prov["sampling_seed"] == 20261118
+    assert hashlib.sha256(raw_bytes).hexdigest() == prov["dataset_sha256"]
+    assert prov["by_language"] == {"ja": 138, "en": 40}
+    assert prov["by_language"]["ja"] > prov["by_language"]["en"]
+    assert prov["by_label"] == {"ENTAIL": 89, "NO_ENTAIL": 89}
+    assert prov["by_source"] == {"paws_x_ja": 80, "paws_x_en": 40, "jglue_jnli": 58}
+    assert prov["strata_counts"] == {
+        stratum: count for stratum, (count, _, _, _) in FINAL_HOLDOUT_EXPECTED_STRATA.items()
+    }
+
+    existing_norm_pairs = {
+        frozenset((normalize_sentence(it["sentence1"]), normalize_sentence(it["sentence2"])))
+        for it in (dev_items + diag_items)
+    }
+    existing_norm_sentences = {
+        normalize_sentence(it[field])
+        for it in (dev_items + diag_items)
+        for field in ("sentence1", "sentence2")
+    }
+    diag_paws_ids = {str(it["source_id"]) for it in diag_items if it.get("source") == "paws_x"}
+
+    exclusions = prov.get("exclusions", {})
+    excluded_paws_ids = set(exclusions.get("excluded_holdout_paws_ids", []))
+    excluded_jnli_images = set(exclusions.get("excluded_holdout_jnli_image_ids", []))
+    assert excluded_paws_ids == diag_paws_ids
+    assert len(excluded_jnli_images) == 40
+
+    seen_paws_ids: set[str] = set()
+    seen_jnli_images: set[str] = set()
+    seen_norm_sentences: set[str] = set()
+    by_lang = {"ja": 0, "en": 0}
+    by_label = {"ENTAIL": 0, "NO_ENTAIL": 0}
+    by_source = {"paws_x_ja": 0, "paws_x_en": 0, "jglue_jnli": 0}
+    by_stratum = {stratum: 0 for stratum in FINAL_HOLDOUT_EXPECTED_STRATA}
+
+    for it in items:
+        assert HOLDOUT_REQUIRED_KEYS.issubset(it.keys())
+        stratum = it["stratum"]
+        lang = it["language"]
+        label = it["expected_label"]
+        source = it["source"]
+        s1 = it["sentence1"]
+        s2 = it["sentence2"]
+
+        assert stratum in FINAL_HOLDOUT_EXPECTED_STRATA
+        _, exp_lang, exp_label, exp_source = FINAL_HOLDOUT_EXPECTED_STRATA[stratum]
+        assert lang == exp_lang
+        assert label == exp_label
+        assert source == exp_source
+        assert isinstance(it["source_id"], str) and it["source_id"].strip()
+        assert isinstance(it["source_label"], str) and it["source_label"].strip()
+
+        assert is_same_language_pair(s1, s2)
+        if lang == "ja":
+            assert contains_japanese(s1) and contains_japanese(s2)
+        else:
+            assert not contains_japanese(s1) and not contains_japanese(s2)
+
+        n1 = normalize_sentence(s1)
+        n2 = normalize_sentence(s2)
+        assert len(n1) >= 5 and len(n2) >= 5
+        assert n1.upper() != "NS" and n2.upper() != "NS"
+        assert n1 != n2
+        if lang == "en":
+            assert n1.lower() != n2.lower()
+
+        key = frozenset((n1, n2))
+        assert key not in existing_norm_pairs, f"Leaked text pair in {it['id']}"
+        assert n1 not in existing_norm_sentences, f"Leaked sentence1 in {it['id']}"
+        assert n2 not in existing_norm_sentences, f"Leaked sentence2 in {it['id']}"
+        assert n1 not in seen_norm_sentences, f"Duplicate single sentence1 in {it['id']}"
+        assert n2 not in seen_norm_sentences, f"Duplicate single sentence2 in {it['id']}"
+        seen_norm_sentences.update((n1, n2))
+
+        if str(source).startswith("paws_x"):
+            sid = str(it["source_id"])
+            assert sid not in diag_paws_ids, f"Cross-language PAWS ID leak: {sid}"
+            assert sid not in seen_paws_ids, f"Duplicate PAWS source ID across ja/en: {sid}"
+            seen_paws_ids.add(sid)
+        elif source == "jglue_jnli":
+            image_id = it.get("image_id")
+            assert isinstance(image_id, str) and image_id.strip()
+            assert image_id not in excluded_jnli_images, f"Leaked JNLI image_id: {image_id}"
+            assert image_id not in seen_jnli_images, f"Duplicate JNLI image_id: {image_id}"
+            seen_jnli_images.add(image_id)
+
+        by_lang[lang] += 1
+        by_label[label] += 1
+        by_source[source] += 1
+        by_stratum[stratum] += 1
+
+    assert by_lang == prov["by_language"]
+    assert by_label == prov["by_label"]
+    assert by_source == prov["by_source"]
+    assert by_stratum == prov["strata_counts"]
+
+    raw_jnli_path = (
+        Path(__file__).resolve().parents[2]
+        / ".local_docs"
+        / "references"
+        / "external_raw"
+        / "jglue_jnli_test_v1.3.jsonl"
+    )
+    if raw_jnli_path.exists():
+        raw_jnli_by_pair = {
+            str(row["sentence_pair_id"]): row["yjcaptions_id"].split("-")[0]
+            for row in (
+                json.loads(line)
+                for line in raw_jnli_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            )
+        }
+        diag_raw_images = {
+            raw_jnli_by_pair[it["source_id"].split("/")[0]]
+            for it in diag_items
+            if it["source"] == "jglue_jnli"
+        }
+        assert excluded_jnli_images == diag_raw_images
+        for it in items:
+            if it["source"] == "jglue_jnli":
+                p1, p2 = it["source_id"].split("/")
+                assert raw_jnli_by_pair[p1] == it["image_id"]
+                assert raw_jnli_by_pair[p2] == it["image_id"]

@@ -1,0 +1,167 @@
+{
+  "dataset": "sent-shark Untouched Final Evaluation Benchmark (eval_final_holdout.json)",
+  "total_pairs": 178,
+  "dataset_sha256": "cb8fbf82b871484e640d6463538327f67f87f47b96079ee9e6069c9363fe1333",
+  "sampling_seed": 20261118,
+  "sampling_method": "Model-blind deterministic random.Random(20261118) stratified sampling over raw splits sorted by integer row id (PAWS-X) or (image_id, forward_pair_id, reverse_pair_id) (JGLUE JNLI), strictly excluding eval_gauntlet.json and eval_holdout.json pairs, all normalized single sentences across splits and within the fixture, cross-language PAWS-X source IDs, JNLI yjcaptions_id image prefixes, corrupt stubs, and JSICK/JRTE.",
+  "by_language": {
+    "ja": 138,
+    "en": 40
+  },
+  "by_label": {
+    "ENTAIL": 89,
+    "NO_ENTAIL": 89
+  },
+  "by_source": {
+    "paws_x_ja": 80,
+    "paws_x_en": 40,
+    "jglue_jnli": 58
+  },
+  "strata_counts": {
+    "ja_paws_paraphrase": 40,
+    "ja_paws_swap": 40,
+    "en_paws_paraphrase": 20,
+    "en_paws_swap": 20,
+    "ja_jnli_bidir_entail": 29,
+    "ja_jnli_oneway": 10,
+    "ja_jnli_contradict": 10,
+    "ja_jnli_neutral": 9
+  },
+  "hygiene_and_exclusion_rules": [
+    "Strictly model-blind syntactic filters only; authoritative dataset labels preserved verbatim.",
+    "Exclude all JSICK (CC BY-SA 4.0 / directional NLI semantics / akiFQC train overlap) and JRTE (CC BY-NC-SA 4.0).",
+    "Exclude all 20 PAWS-X source_ids present in eval_holdout.json from both paws_x_ja and paws_x_en, and disallow shared PAWS-X source_ids across ja and en.",
+    "Exclude all 40 JGLUE JNLI yjcaptions_id image prefixes present in eval_holdout.json (H01..H40) and enforce at most 1 pair per JNLI image_id across eval_holdout.json and eval_final_holdout.json.",
+    "Require is_same_language_pair(s1, s2) and target-language script match (contains_japanese True for ja, False for en).",
+    "Require len(normalize_sentence(s)) >= 5 and non-placeholder text (rejecting 'NS' stubs).",
+    "Require normalize_sentence(s1) != normalize_sentence(s2) (and case-insensitive inequality for en).",
+    "Enforce global normalized single-sentence uniqueness across eval_gauntlet.json, eval_holdout.json, and all pairs selected into eval_final_holdout.json.",
+    "JNLI bidir_entail cap note: jglue_jnli_test_v1.3.jsonl contains 57 two-row bidirectional entailment+entailment pairs (plus 1 degenerate 4-row s1==s2 group, image_id=378111); 20 are consumed by eval_holdout.json (H01..H20) and 8 fail normalize_sentence(s1) != normalize_sentence(s2) (7 exact identical strings + 1 NFKC-identical full-width/half-width numeral pair image_id=485984), leaving 29 eligible bidir_entail pairs. Neutral pairs are set to 9 (with 10 oneway_entail and 10 contradict) so JGLUE JNLI remains 50/50 balanced (29 ENTAIL / 29 NO_ENTAIL, 58 total) and the full benchmark is 50/50 balanced (89 ENTAIL / 89 NO_ENTAIL, 178 total)."
+  ],
+  "label_mapping_rules": {
+    "paws_x_ja": {
+      "ja_paws_paraphrase": "PAWS-X ja/test label == 1 (paraphrase) -> ENTAIL",
+      "ja_paws_swap": "PAWS-X ja/test label == 0 (non-paraphrase / adversarial swap) -> NO_ENTAIL"
+    },
+    "paws_x_en": {
+      "en_paws_paraphrase": "PAWS-X en/test label == 1 (paraphrase) -> ENTAIL",
+      "en_paws_swap": "PAWS-X en/test label == 0 (non-paraphrase / adversarial swap) -> NO_ENTAIL"
+    },
+    "jglue_jnli": {
+      "ja_jnli_bidir_entail": "Both (s1 -> s2) and (s2 -> s1) labeled entailment -> ENTAIL",
+      "ja_jnli_oneway": "One direction labeled entailment and reverse labeled neutral (oriented premise -> hypothesis in entailment direction) -> NO_ENTAIL",
+      "ja_jnli_contradict": "Both directions labeled contradiction -> NO_ENTAIL",
+      "ja_jnli_neutral": "Both directions labeled neutral -> NO_ENTAIL"
+    }
+  },
+  "exclusions": {
+    "excluded_holdout_paws_ids": [
+      "203",
+      "385",
+      "450",
+      "486",
+      "1006",
+      "1098",
+      "1179",
+      "1266",
+      "1333",
+      "2055",
+      "2256",
+      "2462",
+      "2855",
+      "3103",
+      "3260",
+      "5892",
+      "6221",
+      "6685",
+      "6737",
+      "7529"
+    ],
+    "excluded_holdout_jnli_image_ids": [
+      "136732",
+      "141581",
+      "190382",
+      "209144",
+      "21061",
+      "220101",
+      "227451",
+      "233500",
+      "236111",
+      "258768",
+      "269557",
+      "306080",
+      "315568",
+      "335615",
+      "339693",
+      "359423",
+      "364491",
+      "368055",
+      "372615",
+      "374598",
+      "388508",
+      "394468",
+      "396548",
+      "409316",
+      "417234",
+      "437139",
+      "451781",
+      "454044",
+      "4624",
+      "468783",
+      "482195",
+      "485561",
+      "486641",
+      "501846",
+      "517521",
+      "518357",
+      "524816",
+      "532623",
+      "566385",
+      "91307"
+    ]
+  },
+  "sources": {
+    "paws_x_ja": {
+      "dataset_name": "PAWS-X (Cross-lingual Adversarial Dataset for Paraphrase Identification) — ja/test split",
+      "source_url": "https://huggingface.co/datasets/google-research-datasets/paws-x",
+      "api_url": "https://datasets-server.huggingface.co/rows?dataset=google-research-datasets/paws-x&config=ja&split=test",
+      "commit_sha": "4cd8187c404bda33cb1f62b49b001115862acf37",
+      "license": "Permissive free use with Google LLC attribution",
+      "license_notes": "The dataset may be freely used for any purpose, although acknowledgement of Google LLC (\"Google\") as the data source would be appreciated. Provided \"AS IS\" without any warranty.",
+      "citation": "Yang, Y., Zhang, Y., Tar, C., & Baldridge, J. (2019). PAWS-X: A Cross-lingual Adversarial Dataset for Paraphrase Identification. In Proceedings of EMNLP 2019.",
+      "raw_file": ".local_docs/references/external_raw/paws_x_ja_test.json",
+      "raw_file_bytes": 792350,
+      "raw_file_sha256": "1b211a17aae53937b512cd7b0939fcb5fd1c0fcea7ea45c7e746db040d4c7fda",
+      "raw_split_rows": 2000,
+      "sampled_count": 80
+    },
+    "paws_x_en": {
+      "dataset_name": "PAWS-X (Cross-lingual Adversarial Dataset for Paraphrase Identification) — en/test split",
+      "source_url": "https://huggingface.co/datasets/google-research-datasets/paws-x",
+      "api_url": "https://datasets-server.huggingface.co/rows?dataset=google-research-datasets/paws-x&config=en&split=test",
+      "commit_sha": "4cd8187c404bda33cb1f62b49b001115862acf37",
+      "license": "Permissive free use with Google LLC attribution",
+      "license_notes": "The dataset may be freely used for any purpose, although acknowledgement of Google LLC (\"Google\") as the data source would be appreciated. Provided \"AS IS\" without any warranty.",
+      "citation": "Yang, Y., Zhang, Y., Tar, C., & Baldridge, J. (2019). PAWS-X: A Cross-lingual Adversarial Dataset for Paraphrase Identification. In Proceedings of EMNLP 2019.",
+      "raw_file": ".local_docs/references/external_raw/paws_x_en_test.json",
+      "raw_file_bytes": 618448,
+      "raw_file_sha256": "5ddc2a4f3134bd27434587f1fa4103a15aa16e65062a3955c75cca901426908c",
+      "raw_split_rows": 2000,
+      "sampled_count": 40
+    },
+    "jglue_jnli": {
+      "dataset_name": "JGLUE (Japanese General Language Understanding Evaluation) — JNLI v1.3 test split",
+      "source_url": "https://raw.githubusercontent.com/yahoojapan/JGLUE/6f071c09316baae89c3d083a90985b4b1cb9968c/datasets/jnli-v1.3/test-v1.3.json",
+      "repository_url": "https://github.com/yahoojapan/JGLUE",
+      "commit_sha": "6f071c09316baae89c3d083a90985b4b1cb9968c",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "citation": "Kurihara, K., Kawahara, D., & Shibata, T. (2022). JGLUE: Japanese General Language Understanding Evaluation. In Proceedings of LREC 2022 (pp. 2957-2966). https://aclanthology.org/2022.lrec-1.317",
+      "raw_file": ".local_docs/references/external_raw/jglue_jnli_test_v1.3.jsonl",
+      "raw_file_bytes": 652436,
+      "raw_file_sha256": "f40849584d4291ec172dcd869646800cc8c82457cde2260a0f45934eda307792",
+      "raw_split_rows": 2508,
+      "sampled_count": 58
+    }
+  }
+}
