@@ -67,7 +67,13 @@ def _resolve_request_id(request) -> str:
     raw = request.headers.get("X-Request-Id", "")
     if isinstance(raw, str):
         cleaned = raw.strip()
-        if cleaned and "\n" not in cleaned and "\r" not in cleaned:
+        if (
+            cleaned
+            and cleaned.isascii()
+            and cleaned.isprintable()
+            and "\n" not in cleaned
+            and "\r" not in cleaned
+        ):
             return cleaned[:128]
     return str(uuid.uuid4())
 
@@ -82,8 +88,10 @@ class _BaseJudgeView(APIView):
     permission_classes = []
 
     def initial(self, request, *args, **kwargs):
-        super().initial(request, *args, **kwargs)
+        if not hasattr(self, "headers"):
+            self.headers = {}
         self.headers["X-Request-Id"] = _resolve_request_id(request)
+        super().initial(request, *args, **kwargs)
 
     def _check_rate_limit(self, request, started_at: float) -> tuple[str, Response | None]:
         if not hasattr(self, "headers"):

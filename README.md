@@ -31,9 +31,9 @@ uv sync --all-groups
 uv run manage.py migrate
 uv run manage.py runserver
 
-# Or using Python venv:
+# Or using Python venv (pip >= 25.1 required for PEP 735 --group):
 python3 -m venv .venv
-.venv/bin/pip install -e ".[dev]"
+.venv/bin/pip install --upgrade pip && .venv/bin/pip install -e . --group dev
 .venv/bin/python manage.py migrate
 .venv/bin/python manage.py runserver
 ```
@@ -52,7 +52,7 @@ python3 -m venv .venv
 ### Verification, Linting & Benchmark Commands
 
 ```bash
-.venv/bin/pytest -v            # 60 tests
+.venv/bin/pytest -v            # 67 tests
 .venv/bin/ruff check .
 .venv/bin/ruff format --check .
 .venv/bin/python manage.py run_eval
@@ -78,7 +78,7 @@ All `/judge*` routes are mounted both at root (`/judge*`) and under `/api/v1/jud
 ### Common Headers & Rate-Limit Behavior
 
 Every response from `/judge`, `/judge/bulk`, `/judge/stats`, and `/judge/evaluate` (`200`, `400`, and `429`) includes:
-- `X-Request-Id`: Propagates a valid incoming `X-Request-Id` header (trimmed, max 128 chars, single-line) or generates a UUID4 identifier.
+- `X-Request-Id`: Propagates a valid incoming `X-Request-Id` header (trimmed, printable ASCII, max 128 chars) or generates a UUID4 identifier.
 - `X-RateLimit-Limit`: Maximum requests allowed per sliding window per `client_ip` (default `"5"`).
 - `X-RateLimit-Remaining`: Remaining requests in the current `1.0s` sliding window (`"0"` when rate-limited).
 - `Retry-After` (`429` only): Whole seconds to wait before retrying (`max(1, ceil(retry_after))`).

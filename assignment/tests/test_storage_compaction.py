@@ -1,7 +1,8 @@
 import pytest
 
 from assignment.models import JudgmentRecord, RequestAuditLog
-from assignment.services.judge_service import judge_single, prune_storage_if_needed
+from assignment.services import judge_service
+from assignment.services.judge_service import judge_bulk, judge_single, prune_storage_if_needed
 from assignment.views import _record_audit
 
 
@@ -146,3 +147,84 @@ def test_persist_and_audit_prune_only_own_table(settings, rf):
 def test_storage_limits_default_settings(settings):
     assert settings.MAX_STORED_JUDGMENTS == 10000
     assert settings.MAX_AUDIT_LOGS == 50000
+
+
+@pytest.mark.django_db
+def test_zero_max_stored_judgments_leaves_db_and_hot_cache_empty(settings):
+    settings.MAX_STORED_JUDGMENTS = 0
+
+    first = judge_single("テストゼロ文です。", "テストゼロ文だ。")
+    assert first.cached is False
+    assert JudgmentRecord.objects.count() == 0
+    assert len(judge_service._HOT_CACHE) == 0
+
+    second = judge_single("テストゼロ文です。", "テストゼロ文だ。")
+    assert second.cached is False
+    assert JudgmentRecord.objects.count() == 0
+    assert len(judge_service._HOT_CACHE) == 0
+
+
+@pytest.mark.django_db
+def test_bulk_exceeding_max_stored_judgments_evicts_pruned_from_hot_cache(settings):
+    settings.MAX_STORED_JUDGMENTS = 1
+    pairs = [(f"テスト一括{i}です。", f"テスト一括{i}だ。") for i in range(3)]
+
+    outputs = judge_bulk(pairs)
+    assert len(outputs) == 3
+    assert all(out.cached is False for out in outputs)
+    assert JudgmentRecord.objects.count() == 1
+
+    surviving_hashes = set(JudgmentRecord.objects.values_list("pair_hash", flat=True))
+    assert set(judge_service._HOT_CACHE.keys()) == surviving_hashes
+
+    # The oldest pruned pair must not hit _HOT_CACHE on a subsequent request.
+    recheck = judge_single(*pairs[0])
+    assert recheck.cached is False
+
+
+@pytest.mark.django_db
+def test_prune_table_handles_more_than_500_deleted_rows(settings):
+    records = [
+        JudgmentRecord(
+            pair_hash=f"batch-hash-{i}",
+            sentence1=f"バッチ文{i}です。",
+            sentence2=f"バッチ文{i}だ。",
+            label=JudgmentRecord.LABEL_ENTAIL,
+            score=0.95,
+            tier_used=JudgmentRecord.TIER_RULE,
+        )
+        for i in range(550)
+    ]
+    JudgmentRecord.objects.bulk_create(records)
+    judge_service._cache_put_many(
+        {
+            rec.pair_hash: judge_service.JudgmentOutput(
+                label=rec.label,
+                score=rec.score,
+                tier_used=rec.tier_used,
+                cached=True,
+            )
+            for rec in records
+        },
+        max_entries=600,
+    )
+    RequestAuditLog.objects.bulk_create(
+        [
+            RequestAuditLog(
+                client_ip=f"10.1.{i // 250}.{i % 250}",
+                method="POST",
+                path="/judge",
+                status_code=200,
+            )
+            for i in range(520)
+        ]
+    )
+
+    settings.MAX_STORED_JUDGMENTS = 10
+    settings.MAX_AUDIT_LOGS = 5
+    prune_storage_if_needed()
+
+    assert JudgmentRecord.objects.count() == 10
+    assert RequestAuditLog.objects.count() == 5
+    surviving_hashes = set(JudgmentRecord.objects.values_list("pair_hash", flat=True))
+    assert set(judge_service._HOT_CACHE.keys()) == surviving_hashes

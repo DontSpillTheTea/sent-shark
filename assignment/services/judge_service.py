@@ -27,6 +27,16 @@ _SQLITE_WRITE_LOCK = threading.RLock()
 _HOT_CACHE_MAX_ENTRIES = 2048
 _HOT_CACHE_LOCK = threading.Lock()
 _HOT_CACHE: OrderedDict[str, JudgmentOutput] = OrderedDict()
+_DELETE_BATCH_SIZE = 500
+
+
+def _run_sqlite_write(fn: Callable[[], None]) -> None:
+    """Serialize write operations on SQLite to avoid single-writer lock contention."""
+    if connection.vendor == "sqlite":
+        with _SQLITE_WRITE_LOCK:
+            fn()
+    else:
+        fn()
 
 
 @dataclass(frozen=True)
@@ -127,6 +137,9 @@ def _cache_put_many(
     entries: dict[str, JudgmentOutput],
     max_entries: int | None = None,
 ) -> None:
+    if int(getattr(settings, "MAX_STORED_JUDGMENTS", 10000)) <= 0:
+        reset_cache()
+        return
     if not entries:
         return
     limit = _HOT_CACHE_MAX_ENTRIES if max_entries is None else max_entries
@@ -187,20 +200,23 @@ def _prune_table(model_cls, max_rows: int) -> None:
         with transaction.atomic():
             keep_qs = model_cls.objects.order_by("-created_at", "-id").values("id")[:max_rows]
             if model_cls is JudgmentRecord:
-                pruned_hashes = list(
-                    JudgmentRecord.objects.exclude(id__in=keep_qs).values_list(
-                        "pair_hash", flat=True
-                    )
+                pruned_rows = list(
+                    model_cls.objects.exclude(id__in=keep_qs).values_list("id", "pair_hash")
                 )
-            model_cls.objects.exclude(id__in=keep_qs).delete()
+                pruned_ids = [row_id for row_id, _ in pruned_rows]
+                pruned_hashes = [pair_hash for _, pair_hash in pruned_rows]
+            else:
+                pruned_ids = list(
+                    model_cls.objects.exclude(id__in=keep_qs).values_list("id", flat=True)
+                )
+            for start in range(0, len(pruned_ids), _DELETE_BATCH_SIZE):
+                model_cls.objects.filter(
+                    id__in=pruned_ids[start : start + _DELETE_BATCH_SIZE]
+                ).delete()
         if model_cls is JudgmentRecord and pruned_hashes:
             _cache_evict(pruned_hashes)
 
-    if connection.vendor == "sqlite":
-        with _SQLITE_WRITE_LOCK:
-            _do_prune()
-    else:
-        _do_prune()
+    _run_sqlite_write(_do_prune)
 
 
 def prune_storage_if_needed(judgments: bool = True, audit_logs: bool = True) -> None:
@@ -216,11 +232,7 @@ def prune_storage_if_needed(judgments: bool = True, audit_logs: bool = True) -> 
             max_audit_logs = int(getattr(settings, "MAX_AUDIT_LOGS", 50000))
             _prune_table(RequestAuditLog, max_audit_logs)
 
-    if connection.vendor == "sqlite":
-        with _SQLITE_WRITE_LOCK:
-            _do_prune()
-    else:
-        _do_prune()
+    _run_sqlite_write(_do_prune)
 
 
 def _persist_records_safely(records_to_create: list[JudgmentRecord]) -> None:
@@ -249,13 +261,8 @@ def _persist_records_safely(records_to_create: list[JudgmentRecord]) -> None:
             except IntegrityError:
                 # Another concurrent transaction inserted this exact pair_hash first.
                 pass
-        prune_storage_if_needed(judgments=True, audit_logs=False)
 
-    if connection.vendor == "sqlite":
-        with _SQLITE_WRITE_LOCK:
-            _do_write()
-    else:
-        _do_write()
+    _run_sqlite_write(_do_write)
 
 
 def judge_single(sentence1: str, sentence2: str) -> JudgmentOutput:
@@ -406,6 +413,7 @@ def judge_bulk(pairs: list[tuple[str, str]]) -> list[JudgmentOutput]:
                 _persist_records_safely(new_records)
                 if owned_results:
                     _cache_put_many(owned_results)
+                prune_storage_if_needed(judgments=True, audit_logs=False)
                 computed_by_hash.update(owned_results)
             except BaseException as exc:
                 owned_error = exc
@@ -479,6 +487,19 @@ def compute_stats() -> dict:
     }
 
 
+def _update_expected_labels(updates: list[tuple[str, str]]) -> None:
+    """Persist ground-truth expected_label annotations safely on SQLite and Postgres."""
+    if not updates:
+        return
+
+    def _do_update() -> None:
+        with transaction.atomic():
+            for pair_hash, expected in updates:
+                JudgmentRecord.objects.filter(pair_hash=pair_hash).update(expected_label=expected)
+
+    _run_sqlite_write(_do_update)
+
+
 def evaluate_ground_truth(
     labeled_pairs: list[tuple[str, str, str]],
 ) -> dict:
@@ -491,10 +512,11 @@ def evaluate_ground_truth(
 
     tp = fp = tn = fn = 0
     results = []
+    expected_updates: list[tuple[str, str]] = []
 
-    for (s1, s2, expected), pred in zip(labeled_pairs, predictions):
+    for (s1, s2, expected), pred in zip(labeled_pairs, predictions, strict=True):
         pair_hash, _, _ = compute_pair_hash(s1, s2)
-        JudgmentRecord.objects.filter(pair_hash=pair_hash).update(expected_label=expected)
+        expected_updates.append((pair_hash, expected))
         is_correct = pred.label == expected
         if expected == "ENTAIL" and pred.label == "ENTAIL":
             tp += 1
@@ -516,6 +538,8 @@ def evaluate_ground_truth(
                 "tier_used": pred.tier_used,
             }
         )
+
+    _update_expected_labels(expected_updates)
 
     total = len(labeled_pairs)
     accuracy = round((tp + tn) / total, 4) if total else 0.0

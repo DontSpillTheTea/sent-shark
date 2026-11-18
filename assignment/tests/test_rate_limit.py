@@ -1,4 +1,5 @@
 import time
+import uuid
 
 import pytest
 from rest_framework import status
@@ -164,6 +165,58 @@ class TestRateLimit:
         assert r_eval_429.status_code == status.HTTP_429_TOO_MANY_REQUESTS
         assert_std_headers(r_eval_429, "0")
         assert int(r_eval_429.headers["Retry-After"]) >= 1
+
+    @pytest.mark.parametrize("bad_id", ["bad\tid", "日本語id", "bad\r\nid"])
+    def test_invalid_request_id_replaced_with_uuid4_including_400(self, bad_id: str):
+        r_ok = self.client.post(
+            "/judge",
+            {"sentence1": "私は猫が大好きだ。", "sentence2": "猫が好きです。"},
+            format="json",
+            REMOTE_ADDR="192.0.2.150",
+            HTTP_X_REQUEST_ID=bad_id,
+        )
+        assert r_ok.status_code == status.HTTP_200_OK
+        req_id_ok = r_ok.headers["X-Request-Id"]
+        assert req_id_ok != bad_id
+        parsed_ok = uuid.UUID(req_id_ok)
+        assert parsed_ok.version == 4
+        assert str(parsed_ok) == req_id_ok
+
+        r_bad = self.client.post(
+            "/judge",
+            {"sentence1": "", "sentence2": "猫が好きです。"},
+            format="json",
+            REMOTE_ADDR="192.0.2.150",
+            HTTP_X_REQUEST_ID=bad_id,
+        )
+        assert r_bad.status_code == status.HTTP_400_BAD_REQUEST
+        req_id_bad = r_bad.headers["X-Request-Id"]
+        assert req_id_bad != bad_id
+        parsed_bad = uuid.UUID(req_id_bad)
+        assert parsed_bad.version == 4
+        assert str(parsed_bad) == req_id_bad
+
+    def test_request_id_present_on_parse_and_initial_errors(self):
+        r_parse = self.client.post(
+            "/judge",
+            data=b"{bad json",
+            content_type="application/json",
+            REMOTE_ADDR="192.0.2.160",
+            HTTP_X_REQUEST_ID="valid-req-400",
+        )
+        assert r_parse.status_code == status.HTTP_400_BAD_REQUEST
+        assert r_parse.headers["X-Request-Id"] == "valid-req-400"
+
+        r_not_acc = self.client.post(
+            "/judge",
+            {"sentence1": "私は猫が大好きだ。", "sentence2": "猫が好きです。"},
+            format="json",
+            REMOTE_ADDR="192.0.2.160",
+            HTTP_X_REQUEST_ID="valid-req-406",
+            HTTP_ACCEPT="application/xml",
+        )
+        assert r_not_acc.status_code == status.HTTP_406_NOT_ACCEPTABLE
+        assert r_not_acc.headers["X-Request-Id"] == "valid-req-406"
 
 
 def test_rate_limiter_evicts_oldest_ip_keys_when_capacity_exceeded():
