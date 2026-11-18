@@ -52,7 +52,7 @@ python3 -m venv .venv
 ### Verification, Linting & Benchmark Commands
 
 ```bash
-.venv/bin/pytest -v
+.venv/bin/pytest -v            # 60 tests
 .venv/bin/ruff check .
 .venv/bin/ruff format --check .
 .venv/bin/python manage.py run_eval
@@ -350,22 +350,23 @@ All numbers below come directly from running the committed evaluation command ag
 
 | Mode | Accuracy | Precision | Recall | F1 | Specificity | Brier Score | Batch Total (ms) | Mean (ms) | p50 (ms) | p95 (ms) | p99 (ms) | CM (TP/FP/TN/FN) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| `tier1` | 0.6667 | 0.7273 | 0.5333 | 0.6154 | 0.8000 | 0.243075 | 7.72 | 0.13 | 0.09 | 0.29 | 0.33 | 16/6/24/14 |
-| `tier2` | 0.8333 | 0.8333 | 0.8333 | 0.8333 | 0.8333 | 0.165587 | 495.24 | 54.83 | 54.27 | 63.02 | 67.69 | 25/5/25/5 |
-| `hybrid` | 0.9333 | 0.9333 | 0.9333 | 0.9333 | 0.9333 | 0.072102 | 533.70 | 39.58 | 53.87 | 63.78 | 69.08 | 28/2/28/2 |
+| `tier1` | 0.6500 | 0.7143 | 0.5000 | 0.5882 | 0.8000 | 0.245949 | 8.99 | 0.15 | 0.09 | 0.34 | 0.38 | 15/6/24/15 |
+| `tier2` | 0.8333 | 0.8333 | 0.8333 | 0.8333 | 0.8333 | 0.165574 | 417.03 | 52.82 | 53.12 | 60.45 | 66.45 | 25/5/25/5 |
+| `hybrid` | 0.9167 | 0.9310 | 0.9000 | 0.9153 | 0.9333 | 0.088749 | 538.65 | 41.01 | 53.61 | 70.03 | 75.28 | 27/2/28/3 |
 
 ### Per-Difficulty Accuracy
 
 | Difficulty | `tier1` | `tier2` | `hybrid` |
 |---|---:|---:|---:|
 | `easy` | 1.0000 (15/15) | 1.0000 (15/15) | 1.0000 (15/15) |
-| `medium` | 0.8667 (13/15) | 0.8000 (12/15) | 1.0000 (15/15) |
+| `medium` | 0.8000 (12/15) | 0.8000 (12/15) | 0.9333 (14/15) |
 | `hard` | 0.3333 (5/15) | 0.8667 (13/15) | 1.0000 (15/15) |
 | `edge` | 0.4667 (7/15) | 0.6667 (10/15) | 0.7333 (11/15) |
 
-### Misclassified Pairs Analysis (`hybrid`: 4 / 60)
+### Misclassified Pairs Analysis (`hybrid`: 5 / 60)
 
-- **`hybrid` (`4` errors, `93.33%` accuracy, Brier `0.072102` vs. `0.165587` for raw `tier2`):** `100%` (`45/45`) across `easy`, `medium`, and `hard`; all 4 remaining misses are `edge` cases:
+- **`hybrid` (`5` errors, `91.67%` accuracy, Brier `0.088749` vs. `0.165574` for raw `tier2`):** `100%` (`30/30`) across `easy` and `hard`, `93.33%` (`14/15`) on `medium`, and `73.33%` (`11/15`) on `edge`:
+  - `G22` (`en`, `medium`, `lexical_paraphrase`, `ENTAIL`): `"A canine was sleeping near the front door."` vs. `"A dog was sleeping by the front door."` — rare-word/taxonomic synonym (`canine` vs. `dog`) missed by MiniLMv2-L6 once taxonomic regex rewrites were removed to preserve strict directional-hypernym fidelity.
   - `G46` (`ja`, `double_negation`, `ENTAIL`): `"この規則を知らない人はいない。"` vs. `"全員がこの規則を知っている。"` — double negation (`〜ない人はいない`) vs. universal quantifier (`全員`).
   - `G50` (`en`, `double_negation`, `ENTAIL`): `"No student failed to submit the report."` vs. `"Every student submitted the report."` — double negative (`No ... failed to`) vs. universal (`Every ...`).
   - `G55` (`ja`, `role_inversion`, `NO_ENTAIL`): `"太郎が花子に秘密を打ち明けた。"` vs. `"花子が太郎に秘密を打ち明けた。"` — 3-argument ditransitive (`が`/`に`/`を`) swap where Tier 1's 2-argument `が`/`を` regex does not trigger and MiniLMv2-L6 is insensitive to argument order.
