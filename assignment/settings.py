@@ -107,9 +107,17 @@ STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 AUTH_USER_MODEL = "assignment.User"
 
+
+def _optional_int_env(name: str) -> int | None:
+    raw = os.environ.get(name, "").strip()
+    return int(raw) if raw else None
+
+
 # Entailment Judge & Rate Limit Configuration
 NLI_MODEL_NAME = os.environ.get("NLI_MODEL_NAME", "MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli")
 NLI_ENABLE_MODEL = os.environ.get("NLI_ENABLE_MODEL", "true").lower() == "true"
+NLI_ENTAIL_INDEX = _optional_int_env("NLI_ENTAIL_INDEX")
+NLI_CONTRADICT_INDEX = _optional_int_env("NLI_CONTRADICT_INDEX")
 ENTAIL_THRESHOLD = float(os.environ.get("ENTAIL_THRESHOLD", "0.50"))
 LLM_ESCALATION_LOW = float(os.environ.get("LLM_ESCALATION_LOW", "0.40"))
 LLM_ESCALATION_HIGH = float(os.environ.get("LLM_ESCALATION_HIGH", "0.65"))
@@ -118,6 +126,14 @@ OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
 RATE_LIMIT_REQUESTS = int(os.environ.get("RATE_LIMIT_REQUESTS", "5"))
 RATE_LIMIT_WINDOW_SECONDS = float(os.environ.get("RATE_LIMIT_WINDOW_SECONDS", "1.0"))
+TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+TRUSTED_PROXY_IPS = [
+    ip.strip() for ip in os.getenv("TRUSTED_PROXY_IPS", "").split(",") if ip.strip()
+]
 
 MAX_STORED_JUDGMENTS = int(os.environ.get("MAX_STORED_JUDGMENTS", "10000"))
 MAX_AUDIT_LOGS = int(os.environ.get("MAX_AUDIT_LOGS", "50000"))

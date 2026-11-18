@@ -214,3 +214,91 @@ class TestJudgeAPI:
         fallback = nli_engine.score_pairs_batch([pair], t1, escalation_judge=FailingLLM())[0]
         assert fallback.tier_used == "tier2_nli"
         assert fallback.label == "ENTAIL"
+
+
+def test_unknown_nli_id2label_raises_explicit_value_error(monkeypatch, settings):
+    from types import SimpleNamespace
+
+    import torch
+    import transformers
+
+    from assignment.services.nli_engine import HuggingFaceNLIEngine, NoOpEscalationJudge
+    from assignment.services.normalizer import evaluate_tier1
+
+    current_id2label = {0: "LABEL_0", 1: "LABEL_1", 2: "LABEL_2"}
+
+    def fake_tokenizer(
+        premises,
+        hypotheses,
+        padding=True,
+        truncation=True,
+        max_length=256,
+        return_tensors="pt",
+    ):
+        return {"input_ids": torch.zeros((len(premises), 4), dtype=torch.long)}
+
+    class FakeModel:
+        def __init__(self, id2label):
+            self.config = SimpleNamespace(
+                id2label=id2label,
+                num_labels=len(id2label),
+                _commit_hash="deadbeef1234",
+            )
+
+        def eval(self):
+            return self
+
+        def __call__(self, **encoded):
+            batch_n = encoded["input_ids"].shape[0]
+            # High logit at index 2 (custom entailment when overridden), low at index 0
+            logits = torch.tensor([[-2.0, 0.0, 4.0]] * batch_n, dtype=torch.float32)
+            return SimpleNamespace(logits=logits)
+
+    monkeypatch.setattr(
+        transformers.AutoTokenizer,
+        "from_pretrained",
+        lambda _name: fake_tokenizer,
+    )
+    monkeypatch.setattr(
+        transformers.AutoModelForSequenceClassification,
+        "from_pretrained",
+        lambda _name: FakeModel(current_id2label),
+    )
+
+    pair = ("私は猫が大好きだ。", "猫が好きです。")
+    t1 = [evaluate_tier1(*pair)]
+
+    # 1. Unknown id2label with no explicit override must raise ValueError explicitly (twice too!)
+    settings.NLI_ENTAIL_INDEX = None
+    settings.NLI_CONTRADICT_INDEX = None
+    engine = HuggingFaceNLIEngine("mock/unknown-id2label")
+    with pytest.raises(ValueError, match="id2label"):
+        engine.score_pairs_batch([pair], t1, escalation_judge=NoOpEscalationJudge())
+    with pytest.raises(ValueError, match="id2label"):
+        engine.score_pairs_batch([pair], t1, escalation_judge=NoOpEscalationJudge())
+
+    # 2. Ambiguous id2label ("entailment" + "not_entailment") must raise ValueError
+    current_id2label = {0: "entailment", 1: "not_entailment", 2: "neutral"}
+    ambiguous_engine = HuggingFaceNLIEngine("mock/ambiguous-id2label")
+    with pytest.raises(ValueError):
+        ambiguous_engine.score_pairs_batch([pair], t1, escalation_judge=NoOpEscalationJudge())
+
+    # 3. Invalid override indices (out-of-range, negative, equal, partial) raise ValueError
+    current_id2label = {0: "LABEL_0", 1: "LABEL_1", 2: "LABEL_2"}
+    for bad_entail, bad_contradict in [(3, 0), (-1, 0), (1, 1), (0, None)]:
+        settings.NLI_ENTAIL_INDEX = bad_entail
+        settings.NLI_CONTRADICT_INDEX = bad_contradict
+        bad_engine = HuggingFaceNLIEngine("mock/invalid-override")
+        with pytest.raises(ValueError):
+            bad_engine.score_pairs_batch([pair], t1, escalation_judge=NoOpEscalationJudge())
+
+    # 4. Valid explicit override works and captures model_revision
+    settings.NLI_ENTAIL_INDEX = 2
+    settings.NLI_CONTRADICT_INDEX = 0
+    override_engine = HuggingFaceNLIEngine("mock/explicit-override")
+    res = override_engine.score_pairs_batch([pair], t1, escalation_judge=NoOpEscalationJudge())
+    assert len(res) == 1
+    assert res[0].tier_used == "tier2_nli"
+    assert res[0].label == "ENTAIL"
+    assert res[0].forward_entail > 0.90
+    assert override_engine.model_revision == "deadbeef1234"

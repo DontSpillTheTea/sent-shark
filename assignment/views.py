@@ -30,6 +30,10 @@ from assignment.services.judge_service import (
 logger = logging.getLogger(__name__)
 
 
+def _get_raw_request(request):
+    return getattr(request, "_request", request)
+
+
 def _record_audit(
     request,
     client_ip: str,
@@ -38,13 +42,19 @@ def _record_audit(
     payload_chars: int = 0,
     rate_limited: bool = False,
 ) -> None:
-    latency_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
+    raw_request = _get_raw_request(request)
+    if getattr(raw_request, "_audit_recorded", False) is True:
+        return
+    raw_request._audit_recorded = True
+    latency_ms = round(max(0.0, (time.perf_counter() - started_at) * 1000.0), 2)
+    method = (getattr(raw_request, "method", None) or "UNKNOWN")[:10]
+    path = (getattr(raw_request, "path", None) or "/")[:255]
 
     def _write():
         RequestAuditLog.objects.create(
             client_ip=client_ip[:64],
-            method=request.method[:10],
-            path=request.path[:255],
+            method=method,
+            path=path,
             status_code=status_code,
             payload_chars=payload_chars,
             latency_ms=latency_ms,
@@ -81,17 +91,58 @@ def _resolve_request_id(request) -> str:
 class _BaseJudgeView(APIView):
     """
     Base APIView handling per-IP sliding-window rate limiting (5 req/s -> 429),
-    standard rate-limit/request-id response headers, and audit logging.
+    standard rate-limit/request-id response headers, and complete audit logging.
     """
 
     authentication_classes = []
     permission_classes = []
+
+    @staticmethod
+    def _get_started_at(request) -> float:
+        raw_request = _get_raw_request(request)
+        started = getattr(raw_request, "_judge_started_at", None)
+        if isinstance(started, (int, float)):
+            return float(started)
+        return time.perf_counter()
+
+    def dispatch(self, request, *args, **kwargs):
+        raw_request = _get_raw_request(request)
+        raw_request._judge_started_at = time.perf_counter()
+        raw_request._audit_recorded = False
+        try:
+            return super().dispatch(request, *args, **kwargs)
+        except Exception:
+            if getattr(raw_request, "_audit_recorded", False) is not True:
+                _record_audit(
+                    raw_request,
+                    client_ip=get_client_ip(raw_request),
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    started_at=self._get_started_at(raw_request),
+                )
+            raise
 
     def initial(self, request, *args, **kwargs):
         if not hasattr(self, "headers"):
             self.headers = {}
         self.headers["X-Request-Id"] = _resolve_request_id(request)
         super().initial(request, *args, **kwargs)
+
+    def finalize_response(self, request, response, *args, **kwargs):
+        if not hasattr(self, "headers"):
+            self.headers = {}
+        if "X-Request-Id" not in self.headers:
+            self.headers["X-Request-Id"] = _resolve_request_id(request)
+        response = super().finalize_response(request, response, *args, **kwargs)
+        raw_request = _get_raw_request(request)
+        if getattr(raw_request, "_audit_recorded", False) is not True:
+            _record_audit(
+                raw_request,
+                client_ip=get_client_ip(raw_request),
+                status_code=response.status_code,
+                started_at=self._get_started_at(raw_request),
+                rate_limited=(response.status_code == status.HTTP_429_TOO_MANY_REQUESTS),
+            )
+        return response
 
     def _check_rate_limit(self, request, started_at: float) -> tuple[str, Response | None]:
         if not hasattr(self, "headers"):
@@ -139,7 +190,7 @@ class JudgeSingleView(_BaseJudgeView):
     """POST /judge — Evaluate entailment between two same-language sentences (F1)."""
 
     def post(self, request):
-        started = time.perf_counter()
+        started = self._get_started_at(request)
         client_ip, limited = self._check_rate_limit(request, started)
         if limited is not None:
             return limited
@@ -175,7 +226,7 @@ class JudgeBulkView(_BaseJudgeView):
     """POST /judge/bulk — Batch entailment judgment for 1 to 100 pairs (F2)."""
 
     def post(self, request):
-        started = time.perf_counter()
+        started = self._get_started_at(request)
         client_ip, limited = self._check_rate_limit(request, started)
         if limited is not None:
             return limited
@@ -236,7 +287,7 @@ class JudgeStatsView(_BaseJudgeView):
     """GET /judge/stats — Aggregate judgment metrics, latency, and accuracy summary (F3)."""
 
     def get(self, request):
-        started = time.perf_counter()
+        started = self._get_started_at(request)
         client_ip, limited = self._check_rate_limit(request, started)
         if limited is not None:
             return limited
@@ -255,7 +306,7 @@ class JudgeEvaluateView(_BaseJudgeView):
     """POST /judge/evaluate — Evaluate against ground-truth pairs and return accuracy/F1 (F3)."""
 
     def post(self, request):
-        started = time.perf_counter()
+        started = self._get_started_at(request)
         client_ip, limited = self._check_rate_limit(request, started)
         if limited is not None:
             return limited

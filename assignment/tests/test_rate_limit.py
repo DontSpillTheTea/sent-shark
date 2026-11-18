@@ -6,7 +6,7 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from assignment.models import RequestAuditLog
-from assignment.rate_limit import rate_limiter
+from assignment.rate_limit import get_client_ip, rate_limiter
 
 
 @pytest.mark.django_db
@@ -50,14 +50,18 @@ class TestRateLimit:
         recovered = self.client.post("/judge", payload, format="json", REMOTE_ADDR=client_ip)
         assert recovered.status_code == status.HTTP_200_OK
 
-    def test_x_forwarded_for_respected_per_client_ip(self):
+    def test_spoofed_x_forwarded_for_ignored_when_trust_proxy_disabled(self, settings):
+        assert getattr(settings, "TRUST_PROXY_HEADERS", False) is False
         payload = {"sentence1": "私は猫が大好きだ。", "sentence2": "猫が好きです。"}
-        for _ in range(5):
+        client_ip = "198.51.100.50"
+
+        for idx in range(5):
             resp = self.client.post(
                 "/judge",
                 payload,
                 format="json",
-                HTTP_X_FORWARDED_FOR="198.51.100.7, 10.0.0.1",
+                REMOTE_ADDR=client_ip,
+                HTTP_X_FORWARDED_FOR=f"203.0.113.{idx + 1}",
             )
             assert resp.status_code == status.HTTP_200_OK
 
@@ -65,9 +69,190 @@ class TestRateLimit:
             "/judge",
             payload,
             format="json",
-            HTTP_X_FORWARDED_FOR="198.51.100.7, 10.0.0.1",
+            REMOTE_ADDR=client_ip,
+            HTTP_X_FORWARDED_FOR="203.0.113.99",
         )
         assert blocked.status_code == status.HTTP_429_TOO_MANY_REQUESTS
+        assert (
+            RequestAuditLog.objects.filter(
+                client_ip=client_ip, rate_limited=True, status_code=429
+            ).count()
+            == 1
+        )
+        assert (
+            RequestAuditLog.objects.filter(
+                client_ip=client_ip, rate_limited=False, status_code=200
+            ).count()
+            == 5
+        )
+
+    def test_trusted_proxy_hops_extract_rightmost_untrusted_client_ip(self, settings):
+        settings.TRUST_PROXY_HEADERS = True
+        settings.TRUSTED_PROXY_IPS = ["10.0.0.1", "10.0.0.2"]
+        payload = {"sentence1": "私は猫が大好きだ。", "sentence2": "猫が好きです。"}
+
+        # Trusted proxy with spoofed left-most token + real client + trusted hop
+        for _ in range(5):
+            resp = self.client.post(
+                "/judge",
+                payload,
+                format="json",
+                REMOTE_ADDR="10.0.0.1",
+                HTTP_X_FORWARDED_FOR="spoofed, 198.51.100.7, 10.0.0.1",
+            )
+            assert resp.status_code == status.HTTP_200_OK
+
+        blocked = self.client.post(
+            "/judge",
+            payload,
+            format="json",
+            REMOTE_ADDR="10.0.0.1",
+            HTTP_X_FORWARDED_FOR="spoofed, 198.51.100.7, 10.0.0.1",
+        )
+        assert blocked.status_code == status.HTTP_429_TOO_MANY_REQUESTS
+        assert (
+            RequestAuditLog.objects.filter(
+                client_ip="198.51.100.7", rate_limited=True, status_code=429
+            ).count()
+            == 1
+        )
+
+        # Multi-proxy chain picks rightmost untrusted IP (198.51.100.8), not left-most (1.2.3.4)
+        for _ in range(5):
+            resp = self.client.post(
+                "/judge",
+                payload,
+                format="json",
+                REMOTE_ADDR="10.0.0.1",
+                HTTP_X_FORWARDED_FOR="1.2.3.4, 198.51.100.8, 10.0.0.2, 10.0.0.1",
+            )
+            assert resp.status_code == status.HTTP_200_OK
+
+        blocked_chain = self.client.post(
+            "/judge",
+            payload,
+            format="json",
+            REMOTE_ADDR="10.0.0.1",
+            HTTP_X_FORWARDED_FOR="1.2.3.4, 198.51.100.8, 10.0.0.2, 10.0.0.1",
+        )
+        assert blocked_chain.status_code == status.HTTP_429_TOO_MANY_REQUESTS
+        assert (
+            RequestAuditLog.objects.filter(client_ip="198.51.100.8", status_code=429).count() == 1
+        )
+        assert RequestAuditLog.objects.filter(client_ip="1.2.3.4").count() == 0
+
+        # Malformed rightmost untrusted token falls back to REMOTE_ADDR (not left-most)
+        class _DummyReq:
+            def __init__(self, remote_addr: str, xff: str):
+                self.META = {"REMOTE_ADDR": remote_addr, "HTTP_X_FORWARDED_FOR": xff}
+
+        assert get_client_ip(_DummyReq("10.0.0.1", "1.2.3.4, malformed, 10.0.0.1")) == "10.0.0.1"
+        assert get_client_ip(_DummyReq("10.0.0.1", "10.0.0.2, 10.0.0.1")) == "10.0.0.1"
+
+        # Untrusted direct REMOTE_ADDR sending X-Forwarded-For must ignore XFF and track REMOTE_ADDR
+        for _ in range(5):
+            untrusted_resp = self.client.post(
+                "/judge",
+                payload,
+                format="json",
+                REMOTE_ADDR="203.0.113.9",
+                HTTP_X_FORWARDED_FOR="198.51.100.7, 10.0.0.1",
+            )
+            assert untrusted_resp.status_code == status.HTTP_200_OK
+
+        untrusted_blocked = self.client.post(
+            "/judge",
+            payload,
+            format="json",
+            REMOTE_ADDR="203.0.113.9",
+            HTTP_X_FORWARDED_FOR="198.51.100.7, 10.0.0.1",
+        )
+        assert untrusted_blocked.status_code == status.HTTP_429_TOO_MANY_REQUESTS
+        assert (
+            RequestAuditLog.objects.filter(
+                client_ip="203.0.113.9", rate_limited=True, status_code=429
+            ).count()
+            == 1
+        )
+
+    def test_malformed_json_and_method_not_allowed_are_audited_without_sentence_content(
+        self, monkeypatch
+    ):
+        from assignment import views as views_mod
+
+        r_parse = self.client.post(
+            "/judge",
+            data=b"{bad json SECRET_SENTENCE_LEAK",
+            content_type="application/json",
+            REMOTE_ADDR="192.0.2.210",
+        )
+        assert r_parse.status_code == status.HTTP_400_BAD_REQUEST
+
+        r_method = self.client.get("/judge", REMOTE_ADDR="192.0.2.211")
+        assert r_method.status_code == status.HTTP_405_METHOD_NOT_ALLOWED
+
+        r_not_acc = self.client.post(
+            "/judge",
+            {"sentence1": "SENSITIVE_ALPHA", "sentence2": "SENSITIVE_BETA"},
+            format="json",
+            REMOTE_ADDR="192.0.2.212",
+            HTTP_ACCEPT="application/xml",
+        )
+        assert r_not_acc.status_code == status.HTTP_406_NOT_ACCEPTABLE
+
+        def failing_judge_single(_s1: str, _s2: str):
+            raise RuntimeError("boom SENSITIVE_EXC")
+
+        monkeypatch.setattr(views_mod, "judge_single", failing_judge_single)
+        client_500 = APIClient(raise_request_exception=False)
+        r_500 = client_500.post(
+            "/judge",
+            {"sentence1": "SENSITIVE_500_A", "sentence2": "SENSITIVE_500_B"},
+            format="json",
+            REMOTE_ADDR="192.0.2.213",
+        )
+        assert r_500.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+
+        assert (
+            RequestAuditLog.objects.filter(
+                client_ip="192.0.2.210", method="POST", path="/judge", status_code=400
+            ).count()
+            == 1
+        )
+        assert (
+            RequestAuditLog.objects.filter(
+                client_ip="192.0.2.211", method="GET", path="/judge", status_code=405
+            ).count()
+            == 1
+        )
+        assert (
+            RequestAuditLog.objects.filter(
+                client_ip="192.0.2.212", method="POST", path="/judge", status_code=406
+            ).count()
+            == 1
+        )
+        assert (
+            RequestAuditLog.objects.filter(
+                client_ip="192.0.2.213", method="POST", path="/judge", status_code=500
+            ).count()
+            == 1
+        )
+
+        # Ensure RequestAuditLog schema and rows never store sentence content
+        audit_fields = {f.name for f in RequestAuditLog._meta.get_fields()}
+        assert not (audit_fields & {"sentence1", "sentence2", "sentence", "text", "payload"})
+        serialized_rows = " ".join(
+            f"{row.client_ip} {row.method} {row.path} {row.status_code}"
+            for row in RequestAuditLog.objects.all()
+        )
+        for sensitive in (
+            "SECRET_SENTENCE_LEAK",
+            "SENSITIVE_ALPHA",
+            "SENSITIVE_BETA",
+            "SENSITIVE_500_A",
+            "SENSITIVE_500_B",
+        ):
+            assert sensitive not in serialized_rows
 
     def test_rate_limit_and_request_id_headers_on_all_judge_endpoints(self):
         judge_payload = {"sentence1": "私は猫が大好きだ。", "sentence2": "猫が好きです。"}

@@ -131,7 +131,107 @@ class HuggingFaceNLIEngine:
         self._model = None
         self._entail_idx: int | None = None
         self._contradict_idx: int | None = None
+        self.model_revision: str | None = None
         self._load_failed = False
+
+    def get_model_revision(self) -> str | None:
+        """Return the loaded HuggingFace model revision commit hash, if available."""
+        return self.model_revision
+
+    @staticmethod
+    def _parse_override_index(value, setting_name: str) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{setting_name} must be a non-negative integer, got {value!r}.")
+        return value
+
+    def _resolve_label_indices(self, model_config) -> tuple[int, int]:
+        id2label = getattr(model_config, "id2label", None)
+        if not isinstance(id2label, dict):
+            id2label = {}
+
+        raw_num_labels = getattr(model_config, "num_labels", None)
+        if (
+            isinstance(raw_num_labels, int)
+            and not isinstance(raw_num_labels, bool)
+            and raw_num_labels > 0
+        ):
+            num_labels: int | None = raw_num_labels
+        elif id2label:
+            try:
+                num_labels = max(int(k) for k in id2label) + 1
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Invalid id2label keys on model '{self.model_name}': {id2label!r}"
+                ) from exc
+        else:
+            num_labels = None
+
+        entail_override = getattr(settings, "NLI_ENTAIL_INDEX", None)
+        contradict_override = getattr(settings, "NLI_CONTRADICT_INDEX", None)
+
+        if (entail_override is None) != (contradict_override is None):
+            raise ValueError(
+                "Both NLI_ENTAIL_INDEX and NLI_CONTRADICT_INDEX must be configured together."
+            )
+
+        if entail_override is not None and contradict_override is not None:
+            entail_idx = self._parse_override_index(entail_override, "NLI_ENTAIL_INDEX")
+            contradict_idx = self._parse_override_index(contradict_override, "NLI_CONTRADICT_INDEX")
+            if entail_idx == contradict_idx:
+                raise ValueError(
+                    f"NLI_ENTAIL_INDEX and NLI_CONTRADICT_INDEX must differ, got {entail_idx}."
+                )
+            if num_labels is not None and (
+                entail_idx >= num_labels or contradict_idx >= num_labels
+            ):
+                raise ValueError(
+                    f"Configured NLI label indices ({entail_idx}, {contradict_idx}) "
+                    f"out of range for num_labels={num_labels} on model '{self.model_name}'."
+                )
+            return entail_idx, contradict_idx
+
+        if not id2label:
+            raise ValueError(
+                f"Model '{self.model_name}' config.id2label is empty; cannot infer "
+                "entailment/contradiction indices. Set NLI_ENTAIL_INDEX and NLI_CONTRADICT_INDEX."
+            )
+
+        entail_matches: list[int] = []
+        contradict_matches: list[int] = []
+        for idx_raw, lbl in id2label.items():
+            try:
+                idx = int(idx_raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Non-integer id2label key {idx_raw!r} on model '{self.model_name}'."
+                ) from exc
+            low = str(lbl).lower()
+            has_entail = "entail" in low
+            has_contradict = "contradict" in low
+            if has_entail and has_contradict:
+                raise ValueError(
+                    f"Ambiguous id2label entry {idx}: {lbl!r} on model '{self.model_name}'."
+                )
+            if has_entail:
+                entail_matches.append(idx)
+            elif has_contradict:
+                contradict_matches.append(idx)
+
+        if len(entail_matches) != 1 or len(contradict_matches) != 1:
+            raise ValueError(
+                f"Unable to resolve entailment/contradiction labels from "
+                f"id2label={id2label!r} for model '{self.model_name}'. "
+                "Configure NLI_ENTAIL_INDEX and NLI_CONTRADICT_INDEX explicitly."
+            )
+
+        entail_idx = entail_matches[0]
+        contradict_idx = contradict_matches[0]
+        if entail_idx == contradict_idx or entail_idx < 0 or contradict_idx < 0:
+            raise ValueError(
+                f"Resolved invalid NLI label indices ({entail_idx}, {contradict_idx}) "
+                f"from id2label={id2label!r} for model '{self.model_name}'."
+            )
+        return entail_idx, contradict_idx
 
     def _ensure_loaded(self) -> bool:
         if not getattr(settings, "NLI_ENABLE_MODEL", True):
@@ -162,27 +262,20 @@ class HuggingFaceNLIEngine:
                 model = AutoModelForSequenceClassification.from_pretrained(self.model_name)
                 model.eval()
 
-                id2label = getattr(model.config, "id2label", None) or {}
-                entail_idx = None
-                contradict_idx = None
-                for idx_raw, lbl in id2label.items():
-                    idx = int(idx_raw)
-                    low = str(lbl).lower()
-                    if "entail" in low:
-                        entail_idx = idx
-                    elif "contradict" in low:
-                        contradict_idx = idx
-
-                if entail_idx is None or contradict_idx is None:
-                    # Fallback standard MNLI/XNLI ordering: 0=entailment, 1=neutral, 2=contradiction
-                    entail_idx = 0 if entail_idx is None else entail_idx
-                    contradict_idx = 2 if contradict_idx is None else contradict_idx
+                entail_idx, contradict_idx = self._resolve_label_indices(model.config)
+                commit_hash = getattr(model.config, "_commit_hash", None)
+                model_revision = (
+                    commit_hash if isinstance(commit_hash, str) and commit_hash else None
+                )
 
                 self._tokenizer = tokenizer
                 self._model = model
                 self._entail_idx = entail_idx
                 self._contradict_idx = contradict_idx
+                self.model_revision = model_revision
                 return True
+            except ValueError:
+                raise
             except Exception as exc:
                 logger.warning(
                     "Unable to load NLI model '%s'; falling back to Tier 1 heuristics: %s",
