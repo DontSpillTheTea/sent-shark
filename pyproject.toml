@@ -1,5 +1,5 @@
 [project]
-name = "entailment-judge-api"
+name = "sent-shark"
 version = "0.1.0"
 description = "Same-Language Entailment Judge API (Mantra Langaku Backend Coding Assignment - Option 3)"
 readme = "README.md"

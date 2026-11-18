@@ -1,4 +1,6 @@
-# Same-Language Entailment Judge API
+# `sent-shark` — Same-Language Entailment Judge API
+
+> *Sentence-Same (鮫 / same)* — checks whether two same-language sentences convey the same meaning.
 
 Backend implementation for **Mantra Inc. — Langaku Backend Engineer Coding Assignment (Option 3: Entailment Judge API)**.
 
