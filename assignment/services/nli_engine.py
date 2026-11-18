@@ -20,6 +20,7 @@ from assignment.services.normalizer import (
     Tier1Result,
     evaluate_tier1,
     normalize_lexical_surface,
+    normalize_sentence,
 )
 
 logger = logging.getLogger(__name__)
@@ -270,6 +271,7 @@ class HuggingFaceNLIEngine:
         pairs: list[tuple[str, str]],
         tier1_results: list[Tier1Result],
         escalation_judge: EscalationJudgeProtocol | None = None,
+        apply_lexical_surface: bool = True,
     ) -> list[NLIScoreDetail]:
         """
         Score a batch of sentence pairs using bidirectional NLI inference.
@@ -312,9 +314,10 @@ class HuggingFaceNLIEngine:
         directional_hypotheses: list[str] = []
         pair_index_map: list[tuple[int, int | None]] = []
 
+        surface_fn = normalize_lexical_surface if apply_lexical_surface else normalize_sentence
         for (s1, s2), t1 in zip(pairs, tier1_results):
-            n1 = normalize_lexical_surface(s1)
-            n2 = normalize_lexical_surface(s2)
+            n1 = surface_fn(s1)
+            n2 = surface_fn(s2)
             raw_idx = len(directional_premises) // 2
             directional_premises.extend((n1, n2))
             directional_hypotheses.extend((n2, n1))

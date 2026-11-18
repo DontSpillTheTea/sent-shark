@@ -298,7 +298,7 @@ def evaluate_uncached_pairs(
             escalation_judge=escalation_judge,
         )
 
-        for (idx, _s1, _s2, _), detail in zip(unresolved_for_tier2, nli_details):
+        for (idx, _s1, _s2, _), detail in zip(unresolved_for_tier2, nli_details, strict=True):
             outputs[idx] = JudgmentOutput(
                 label=detail.label,
                 score=round(detail.score, 4),
@@ -306,7 +306,11 @@ def evaluate_uncached_pairs(
                 cached=False,
             )
 
-    return [out for out in outputs if out is not None]
+    resolved: list[JudgmentOutput] = []
+    for out in outputs:
+        assert out is not None
+        resolved.append(out)
+    return resolved
 
 
 def _compute_uncached_pairs(

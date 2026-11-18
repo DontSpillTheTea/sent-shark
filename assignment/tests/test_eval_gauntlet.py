@@ -172,3 +172,81 @@ def test_run_eval_raises_command_error_for_missing_fixture(tmp_path):
     missing_path = tmp_path / "does_not_exist.json"
     with pytest.raises(CommandError, match="not found"):
         call_command("run_eval", "--fixture", str(missing_path))
+
+
+def test_run_tier2_mode_disables_lexical_surface_rewrites(monkeypatch):
+    from assignment.management.commands.run_eval import _run_tier2_mode
+    from assignment.services import nli_engine as nli_mod
+    from assignment.services.normalizer import Tier1Result, evaluate_tier1
+
+    calls: list[dict[str, object]] = []
+    original_fn = nli_mod.nli_engine.score_pairs_batch
+
+    def recording_score(pairs, tier1_results, escalation_judge=None, apply_lexical_surface=True):
+        calls.append(
+            {
+                "count": len(pairs),
+                "apply_lexical_surface": apply_lexical_surface,
+            }
+        )
+        return original_fn(
+            pairs,
+            tier1_results,
+            escalation_judge=escalation_judge,
+            apply_lexical_surface=apply_lexical_surface,
+        )
+
+    monkeypatch.setattr(nli_mod.nli_engine, "score_pairs_batch", recording_score)
+
+    items = [
+        {
+            "id": "T2_ISO",
+            "difficulty": "medium",
+            "language": "en",
+            "phenomenon": "temporal_shift",
+            "sentence1": "He gave up smoking last year.",
+            "sentence2": "He quit smoking a year ago.",
+            "expected_label": "ENTAIL",
+        }
+    ]
+    preds, latencies, _ = _run_tier2_mode(items)
+    assert len(preds) == 1
+    assert len(latencies) == 1
+    # Raw Tier 2 must pass apply_lexical_surface=False on both batch and per-pair calls
+    assert len(calls) == 2
+    assert all(call["apply_lexical_surface"] is False for call in calls)
+    # Without lexical surface rewrites, raw MiniLM misfires to NO_ENTAIL on G21
+    assert preds[0][0] == "NO_ENTAIL"
+
+    # Verify single-pass un-rewritten surface input when apply_lexical_surface=False
+    s1, s2 = "He gave up smoking last year.", "He quit smoking a year ago."
+    neutral = Tier1Result(
+        decisive=False,
+        label="NO_ENTAIL",
+        score=0.0,
+        reason="tier2_only",
+        canonical_s1=normalize_sentence(s1),
+        canonical_s2=normalize_sentence(s2),
+        fallback_score=0.0,
+    )
+    nli_mod.nli_engine.warm_up()
+    captured_sequences: list[tuple[list[str], list[str]]] = []
+    orig_tokenizer = nli_mod.nli_engine._tokenizer
+
+    def recording_tokenizer(premises, hypotheses, **kwargs):
+        captured_sequences.append((list(premises), list(hypotheses)))
+        return orig_tokenizer(premises, hypotheses, **kwargs)
+
+    monkeypatch.setattr(nli_mod.nli_engine, "_tokenizer", recording_tokenizer)
+    raw_detail = original_fn([(s1, s2)], [neutral], apply_lexical_surface=False)[0]
+    assert raw_detail.label == "NO_ENTAIL"
+    assert len(captured_sequences) == 1
+    assert captured_sequences[0] == (
+        ["He gave up smoking last year", "He quit smoking a year ago"],
+        ["He quit smoking a year ago", "He gave up smoking last year"],
+    )
+
+    # With Tier 1 canonicals + apply_lexical_surface=True, hybrid evaluates both and gets ENTAIL
+    t1 = evaluate_tier1(s1, s2)
+    hybrid_detail = original_fn([(s1, s2)], [t1], apply_lexical_surface=True)[0]
+    assert hybrid_detail.label == "ENTAIL"

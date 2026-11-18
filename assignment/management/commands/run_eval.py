@@ -157,6 +157,7 @@ def _run_tier2_mode(
         pairs,
         neutral_t1,
         escalation_judge=_NOOP_ESCALATION_JUDGE,
+        apply_lexical_surface=False,
     )
     total_ms = (time.perf_counter() - batch_start) * 1000.0
 
@@ -167,6 +168,7 @@ def _run_tier2_mode(
             [pair],
             [t1],
             escalation_judge=_NOOP_ESCALATION_JUDGE,
+            apply_lexical_surface=False,
         )
         latencies_ms.append((time.perf_counter() - t0) * 1000.0)
 

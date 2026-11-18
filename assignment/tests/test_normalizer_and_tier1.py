@@ -145,6 +145,18 @@ def test_temporal_a_year_ago_preserves_modifiers():
     assert normalize_lexical_surface("He left half a year ago.") == "He left half a year ago"
     assert canonicalize_english("He left half a year ago.") == "he left half year ago"
     assert canonicalize_english("He left nearly a year ago.") == "he left nearly year ago"
+    for phrase in (
+        "more than a year ago",
+        "less than a year ago",
+        "just a year ago",
+        "only a year ago",
+        "not a year ago",
+    ):
+        assert "last year" not in normalize_lexical_surface(phrase)
+        assert "last year" not in canonicalize_english(phrase)
+    assert normalize_lexical_surface("A canine was sleeping.") == "A canine was sleeping"
+    assert normalize_lexical_surface("A feline was sleeping.") == "A feline was sleeping"
+    assert canonicalize_english("A canine and a feline.") == "dog and cat"
     assert canonicalize_english("He quit smoking a year ago.") == "he quit smoking last year"
 
 
