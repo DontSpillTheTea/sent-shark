@@ -1,0 +1,223 @@
+openapi: 3.0.3
+info:
+  title: Same-Language Entailment Judge API
+  version: 0.1.0
+  description: >
+    Determines whether two same-language sentences convey the same meaning (entailment)
+    using a 3-Tier Hybrid NLI Pipeline (Deterministic Linguistic Gate + Bidirectional
+    HuggingFace NLI Cross-Encoder + Optional Cloud LLM Escalation).
+servers:
+  - url: http://localhost:8000
+    description: Local Django / Docker server
+paths:
+  /judge:
+    post:
+      summary: Judge entailment for a single same-language sentence pair (F1)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JudgeRequest"
+            example:
+              sentence1: "私は猫が大好きだ。"
+              sentence2: "猫が好きです。"
+      responses:
+        "200":
+          description: Entailment classification and confidence score
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JudgeResponse"
+              example:
+                label: "ENTAIL"
+                score: 0.92
+        "400":
+          description: Validation error (empty text, length exceeded, or mismatched languages)
+        "429":
+          description: Rate limit exceeded (max 5 requests/second per client_ip)
+          headers:
+            Retry-After:
+              schema:
+                type: string
+  /judge/bulk:
+    post:
+      summary: Batch entailment judgment for up to 100 sentence pairs (F2)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: array
+                  minItems: 1
+                  maxItems: 100
+                  items:
+                    $ref: "#/components/schemas/JudgeRequest"
+                - $ref: "#/components/schemas/BulkJudgeRequest"
+      responses:
+        "200":
+          description: Ordered list of entailment judgments
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/JudgeResponse"
+        "400":
+          description: Invalid payload or batch size outside 1..100
+        "429":
+          description: Rate limit exceeded (5 req/s per client_ip)
+  /judge/stats:
+    get:
+      summary: Aggregate judgment statistics, tier distribution, and audit metrics (F3)
+      responses:
+        "200":
+          description: Summary metrics and stored accuracy statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatsResponse"
+        "429":
+          description: Rate limit exceeded
+  /judge/evaluate:
+    post:
+      summary: Evaluate model predictions against ground-truth labels and calculate accuracy/F1 (F3)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pairs]
+              properties:
+                pairs:
+                  type: array
+                  minItems: 1
+                  maxItems: 100
+                  items:
+                    allOf:
+                      - $ref: "#/components/schemas/JudgeRequest"
+                      - type: object
+                        required: [expected_label]
+                        properties:
+                          expected_label:
+                            type: string
+                            enum: [ENTAIL, NO_ENTAIL]
+      responses:
+        "200":
+          description: Evaluation metrics (accuracy, precision, recall, f1, confusion matrix)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvaluateResponse"
+        "400":
+          description: Validation error
+        "429":
+          description: Rate limit exceeded
+  /health:
+    get:
+      summary: Service health check
+      responses:
+        "200":
+          description: Service is healthy
+components:
+  schemas:
+    JudgeRequest:
+      type: object
+      required: [sentence1, sentence2]
+      properties:
+        sentence1:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        sentence2:
+          type: string
+          minLength: 1
+          maxLength: 2000
+    BulkJudgeRequest:
+      type: object
+      required: [pairs]
+      properties:
+        pairs:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/JudgeRequest"
+    JudgeResponse:
+      type: object
+      required: [label, score]
+      properties:
+        label:
+          type: string
+          enum: [ENTAIL, NO_ENTAIL]
+        score:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+    StatsResponse:
+      type: object
+      properties:
+        total_judgments:
+          type: integer
+        label_distribution:
+          type: object
+          properties:
+            ENTAIL:
+              type: integer
+            NO_ENTAIL:
+              type: integer
+        tier_distribution:
+          type: object
+          additionalProperties:
+            type: integer
+        average_score:
+          type: number
+          nullable: true
+        stored_ground_truth_count:
+          type: integer
+        stored_accuracy:
+          type: number
+          nullable: true
+        audit:
+          type: object
+          properties:
+            total_requests:
+              type: integer
+            rate_limited_requests:
+              type: integer
+            average_latency_ms:
+              type: number
+              nullable: true
+    EvaluateResponse:
+      type: object
+      properties:
+        total:
+          type: integer
+        correct:
+          type: integer
+        accuracy:
+          type: number
+        precision:
+          type: number
+        recall:
+          type: number
+        f1:
+          type: number
+        confusion_matrix:
+          type: object
+          properties:
+            tp:
+              type: integer
+            fp:
+              type: integer
+            tn:
+              type: integer
+            fn:
+              type: integer
+        results:
+          type: array
+          items:
+            type: object

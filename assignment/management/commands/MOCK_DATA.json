@@ -1,0 +1,22 @@
+[
+  {
+    "sentence1": "私は猫が大好きだ。",
+    "sentence2": "猫が好きです。",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "sentence1": "俺が守る！",
+    "sentence2": "私が守ります。",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "sentence1": "A cat is a carnivore.",
+    "sentence2": "A cat is a vegetarian.",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "sentence1": "The Earth orbits the Sun.",
+    "sentence2": "Humans are capable of thought.",
+    "expected_label": "NO_ENTAIL"
+  }
+]
