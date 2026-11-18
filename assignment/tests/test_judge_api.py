@@ -124,54 +124,57 @@ class TestJudgeAPI:
         resp_over = self.client.post("/judge/bulk", {"pairs": too_many}, format="json")
         assert resp_over.status_code == status.HTTP_400_BAD_REQUEST
 
-    def test_f3_evaluate_and_stats_accuracy_calculation(self):
-        eval_payload = {
-            "pairs": [
-                {
-                    "sentence1": "私は猫が大好きだ。",
-                    "sentence2": "猫が好きです。",
-                    "expected_label": "ENTAIL",
-                },
-                {
-                    "sentence1": "雨が降っているので、傘を持っていく。",
-                    "sentence2": "雨天のため、傘を持参する。",
-                    "expected_label": "ENTAIL",
-                },
-                {
-                    "sentence1": "A cat is a carnivore.",
-                    "sentence2": "A cat is a vegetarian.",
-                    "expected_label": "NO_ENTAIL",
-                },
-                {
-                    "sentence1": "彼女は毎朝コーヒーを飲む。",
-                    "sentence2": "彼女は毎朝紅茶を飲む。",
-                    "expected_label": "NO_ENTAIL",
-                },
-            ]
-        }
-        eval_resp = self.client.post("/judge/evaluate", eval_payload, format="json")
-        assert eval_resp.status_code == status.HTTP_200_OK
-        assert eval_resp.data["total"] == 4
-        assert eval_resp.data["correct"] == 4
-        assert eval_resp.data["accuracy"] == 1.0
-        assert eval_resp.data["f1"] == 1.0
-
-        stats_resp = self.client.get("/judge/stats")
-        assert stats_resp.status_code == status.HTTP_200_OK
-        assert stats_resp.data["total_judgments"] == 4
-        assert stats_resp.data["stored_ground_truth_count"] == 4
-        assert stats_resp.data["stored_accuracy"] == 1.0
-        assert stats_resp.data["audit"]["total_requests"] >= 1
-        assert RequestAuditLog.objects.count() >= 2
-
-    def test_api_v1_route_aliases_work(self):
-        resp = self.client.post(
-            "/api/v1/judge",
-            {"sentence1": "猫が好きです。", "sentence2": "私は猫が大好きだ。"},
-            format="json",
+    def test_unrequired_stats_evaluate_and_v1_judge_aliases_removed(self):
+        assert self.client.get("/judge/stats").status_code == status.HTTP_404_NOT_FOUND
+        assert self.client.get("/judge/stats/").status_code == status.HTTP_404_NOT_FOUND
+        assert (
+            self.client.post("/judge/evaluate", {"pairs": []}, format="json").status_code
+            == status.HTTP_404_NOT_FOUND
         )
-        assert resp.status_code == status.HTTP_200_OK
-        assert resp.data["label"] == "ENTAIL"
+        assert (
+            self.client.post("/judge/evaluate/", {"pairs": []}, format="json").status_code
+            == status.HTTP_404_NOT_FOUND
+        )
+        for path in (
+            "/api/v1/judge",
+            "/api/v1/judge/",
+            "/api/v1/judge/bulk",
+            "/api/v1/judge/bulk/",
+        ):
+            assert (
+                self.client.post(
+                    path,
+                    {"sentence1": "猫が好きです。", "sentence2": "私は猫が大好きだ。"},
+                    format="json",
+                ).status_code
+                == status.HTTP_404_NOT_FOUND
+            )
+        assert self.client.get("/api/v1/judge/stats").status_code == status.HTTP_404_NOT_FOUND
+        assert (
+            self.client.post("/api/v1/judge/evaluate", {"pairs": []}, format="json").status_code
+            == status.HTTP_404_NOT_FOUND
+        )
+
+        # Kept routes still route properly
+        assert self.client.get("/health").status_code == status.HTTP_200_OK
+        assert self.client.get("/playground").status_code == status.HTTP_200_OK
+        assert self.client.get("/api/v1/user/me/").status_code == status.HTTP_401_UNAUTHORIZED
+        assert (
+            self.client.post(
+                "/judge",
+                {"sentence1": "私は猫が大好きだ。", "sentence2": "猫が好きです。"},
+                format="json",
+            ).status_code
+            == status.HTTP_200_OK
+        )
+        assert (
+            self.client.post(
+                "/judge/bulk",
+                {"pairs": [{"sentence1": "私は猫が大好きだ。", "sentence2": "猫が好きです。"}]},
+                format="json",
+            ).status_code
+            == status.HTTP_200_OK
+        )
 
     def test_tier1_offline_fallback_when_model_disabled(self, settings):
         settings.NLI_ENABLE_MODEL = False

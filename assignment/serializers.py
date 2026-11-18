@@ -1,6 +1,5 @@
 from rest_framework import serializers
 
-from assignment.models import JudgmentRecord
 from assignment.services.normalizer import is_same_language_pair
 
 
@@ -18,13 +17,3 @@ class JudgePairSerializer(serializers.Serializer):
 
 class BulkJudgeWrapperSerializer(serializers.Serializer):
     pairs = JudgePairSerializer(many=True, min_length=1, max_length=100)
-
-
-class LabeledJudgePairSerializer(JudgePairSerializer):
-    expected_label = serializers.ChoiceField(
-        choices=[JudgmentRecord.LABEL_ENTAIL, JudgmentRecord.LABEL_NO_ENTAIL]
-    )
-
-
-class EvaluateRequestSerializer(serializers.Serializer):
-    pairs = LabeledJudgePairSerializer(many=True, min_length=1, max_length=100)

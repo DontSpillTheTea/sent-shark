@@ -6,8 +6,7 @@ info:
     Determines whether two same-language sentences convey the same meaning (entailment)
     using a 3-Tier Hybrid NLI Pipeline (Tier 1 Deterministic Linguistic Gate + Tier 2
     Bidirectional HuggingFace NLI Cross-Encoder + Optional Tier 3 Cloud LLM Escalation).
-    All `/judge*` endpoints are also mounted under `/api/v1/judge*` (with or without trailing
-    slashes) and enforce a 5 req/s per-`client_ip` sliding-window rate limit.
+    `/judge` and `/judge/bulk` enforce a 5 req/s per-`client_ip` sliding-window rate limit.
 servers:
   - url: http://localhost:8000
     description: Local Django / Docker Compose server
@@ -121,128 +120,6 @@ paths:
         "429":
           $ref: "#/components/responses/RateLimitExceeded"
 
-  /judge/stats:
-    get:
-      operationId: judgeStats
-      summary: Aggregate judgment metrics, tier distribution, and audit metrics (F3)
-      parameters:
-        - $ref: "#/components/parameters/XRequestIdHeader"
-      responses:
-        "200":
-          description: Summary metrics and stored ground-truth accuracy statistics
-          headers:
-            X-RateLimit-Limit:
-              $ref: "#/components/headers/X-RateLimit-Limit"
-            X-RateLimit-Remaining:
-              $ref: "#/components/headers/X-RateLimit-Remaining"
-            X-Request-Id:
-              $ref: "#/components/headers/X-Request-Id"
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/StatsResponse"
-        "429":
-          $ref: "#/components/responses/RateLimitExceeded"
-
-  /judge/evaluate:
-    post:
-      operationId: judgeEvaluate
-      summary: Evaluate predictions against ground-truth labels and compute accuracy/F1 (F3)
-      parameters:
-        - $ref: "#/components/parameters/XRequestIdHeader"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/EvaluateRequest"
-            example:
-              pairs:
-                - sentence1: "私は猫が大好きだ。"
-                  sentence2: "猫が好きです。"
-                  expected_label: "ENTAIL"
-                - sentence1: "猫が魚を食べた。"
-                  sentence2: "魚が猫を食べた。"
-                  expected_label: "NO_ENTAIL"
-      responses:
-        "200":
-          description: Evaluation metrics (accuracy, precision, recall, F1, confusion matrix, per-pair results)
-          headers:
-            X-RateLimit-Limit:
-              $ref: "#/components/headers/X-RateLimit-Limit"
-            X-RateLimit-Remaining:
-              $ref: "#/components/headers/X-RateLimit-Remaining"
-            X-Request-Id:
-              $ref: "#/components/headers/X-Request-Id"
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/EvaluateResponse"
-        "400":
-          $ref: "#/components/responses/ValidationError"
-        "429":
-          $ref: "#/components/responses/RateLimitExceeded"
-
-  /api/v1/judge:
-    post:
-      operationId: apiV1JudgeSingle
-      summary: Versioned alias for POST /judge
-      parameters:
-        - $ref: "#/components/parameters/XRequestIdHeader"
-      requestBody:
-        $ref: "#/paths/~1judge/post/requestBody"
-      responses:
-        "200":
-          $ref: "#/paths/~1judge/post/responses/200"
-        "400":
-          $ref: "#/components/responses/ValidationError"
-        "429":
-          $ref: "#/components/responses/RateLimitExceeded"
-
-  /api/v1/judge/bulk:
-    post:
-      operationId: apiV1JudgeBulk
-      summary: Versioned alias for POST /judge/bulk
-      parameters:
-        - $ref: "#/components/parameters/XRequestIdHeader"
-      requestBody:
-        $ref: "#/paths/~1judge~1bulk/post/requestBody"
-      responses:
-        "200":
-          $ref: "#/paths/~1judge~1bulk/post/responses/200"
-        "400":
-          $ref: "#/components/responses/BulkValidationError"
-        "429":
-          $ref: "#/components/responses/RateLimitExceeded"
-
-  /api/v1/judge/stats:
-    get:
-      operationId: apiV1JudgeStats
-      summary: Versioned alias for GET /judge/stats
-      parameters:
-        - $ref: "#/components/parameters/XRequestIdHeader"
-      responses:
-        "200":
-          $ref: "#/paths/~1judge~1stats/get/responses/200"
-        "429":
-          $ref: "#/components/responses/RateLimitExceeded"
-
-  /api/v1/judge/evaluate:
-    post:
-      operationId: apiV1JudgeEvaluate
-      summary: Versioned alias for POST /judge/evaluate
-      parameters:
-        - $ref: "#/components/parameters/XRequestIdHeader"
-      requestBody:
-        $ref: "#/paths/~1judge~1evaluate/post/requestBody"
-      responses:
-        "200":
-          $ref: "#/paths/~1judge~1evaluate/post/responses/200"
-        "400":
-          $ref: "#/components/responses/ValidationError"
-        "429":
-          $ref: "#/components/responses/RateLimitExceeded"
-
 components:
   parameters:
     XRequestIdHeader:
@@ -278,7 +155,7 @@ components:
 
   responses:
     ValidationError:
-      description: Validation error (blank text, max_length=2000 exceeded, invalid expected_label, or cross-language pair).
+      description: Validation error (blank text, max_length=2000 exceeded, or cross-language pair).
       headers:
         X-RateLimit-Limit:
           $ref: "#/components/headers/X-RateLimit-Limit"
@@ -376,25 +253,6 @@ components:
           maxItems: 100
           items:
             $ref: "#/components/schemas/JudgeRequest"
-    LabeledJudgePair:
-      allOf:
-        - $ref: "#/components/schemas/JudgeRequest"
-        - type: object
-          required: [expected_label]
-          properties:
-            expected_label:
-              type: string
-              enum: [ENTAIL, NO_ENTAIL]
-    EvaluateRequest:
-      type: object
-      required: [pairs]
-      properties:
-        pairs:
-          type: array
-          minItems: 1
-          maxItems: 100
-          items:
-            $ref: "#/components/schemas/LabeledJudgePair"
     JudgeResponse:
       type: object
       required: [label, score]
@@ -407,119 +265,6 @@ components:
           format: float
           minimum: 0.0
           maximum: 1.0
-    StatsResponse:
-      type: object
-      required:
-        - total_judgments
-        - label_distribution
-        - tier_distribution
-        - average_score
-        - stored_ground_truth_count
-        - stored_accuracy
-        - audit
-      properties:
-        total_judgments:
-          type: integer
-        label_distribution:
-          type: object
-          required: [ENTAIL, NO_ENTAIL]
-          properties:
-            ENTAIL:
-              type: integer
-            NO_ENTAIL:
-              type: integer
-        tier_distribution:
-          type: object
-          additionalProperties:
-            type: integer
-        average_score:
-          type: number
-          nullable: true
-        stored_ground_truth_count:
-          type: integer
-        stored_accuracy:
-          type: number
-          nullable: true
-        audit:
-          type: object
-          required: [total_requests, rate_limited_requests, average_latency_ms]
-          properties:
-            total_requests:
-              type: integer
-            rate_limited_requests:
-              type: integer
-            average_latency_ms:
-              type: number
-              nullable: true
-    EvaluateResultItem:
-      type: object
-      required:
-        - sentence1
-        - sentence2
-        - expected_label
-        - predicted_label
-        - score
-        - correct
-        - tier_used
-      properties:
-        sentence1:
-          type: string
-        sentence2:
-          type: string
-        expected_label:
-          type: string
-          enum: [ENTAIL, NO_ENTAIL]
-        predicted_label:
-          type: string
-          enum: [ENTAIL, NO_ENTAIL]
-        score:
-          type: number
-          format: float
-        correct:
-          type: boolean
-        tier_used:
-          type: string
-          enum: [tier1_rule, tier2_nli, tier3_llm]
-    EvaluateResponse:
-      type: object
-      required:
-        - total
-        - correct
-        - accuracy
-        - precision
-        - recall
-        - f1
-        - confusion_matrix
-        - results
-      properties:
-        total:
-          type: integer
-        correct:
-          type: integer
-        accuracy:
-          type: number
-        precision:
-          type: number
-        recall:
-          type: number
-        f1:
-          type: number
-        confusion_matrix:
-          type: object
-          required: [tp, fp, tn, fn]
-          properties:
-            tp:
-              type: integer
-            fp:
-              type: integer
-            tn:
-              type: integer
-            fn:
-              type: integer
-        results:
-          type: array
-          items:
-            $ref: "#/components/schemas/EvaluateResultItem"
     ErrorMessage:
       type: object
       required: [error]

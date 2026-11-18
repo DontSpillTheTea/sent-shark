@@ -257,9 +257,6 @@ class TestRateLimit:
     def test_rate_limit_and_request_id_headers_on_all_judge_endpoints(self):
         judge_payload = {"sentence1": "私は猫が大好きだ。", "sentence2": "猫が好きです。"}
         bulk_payload = {"pairs": [judge_payload]}
-        eval_payload = {
-            "pairs": [{**judge_payload, "expected_label": "ENTAIL"}],
-        }
 
         def assert_std_headers(resp, expected_remaining: str, expected_req_id: str | None = None):
             assert resp.headers["X-RateLimit-Limit"] == "5"
@@ -316,40 +313,6 @@ class TestRateLimit:
         assert r_bulk_429.status_code == status.HTTP_429_TOO_MANY_REQUESTS
         assert_std_headers(r_bulk_429, "0")
         assert int(r_bulk_429.headers["Retry-After"]) >= 1
-
-        # 3. GET /judge/stats -> 200, 429
-        for expected_rem in ("4", "3", "2", "1", "0"):
-            r_stats = self.client.get("/judge/stats", REMOTE_ADDR="192.0.2.103")
-            assert r_stats.status_code == status.HTTP_200_OK
-            assert_std_headers(r_stats, expected_rem)
-        r_stats_429 = self.client.get("/judge/stats", REMOTE_ADDR="192.0.2.103")
-        assert r_stats_429.status_code == status.HTTP_429_TOO_MANY_REQUESTS
-        assert_std_headers(r_stats_429, "0")
-        assert int(r_stats_429.headers["Retry-After"]) >= 1
-
-        # 4. POST /judge/evaluate -> 200, 400, 429
-        r_eval_ok = self.client.post(
-            "/judge/evaluate", eval_payload, format="json", REMOTE_ADDR="192.0.2.104"
-        )
-        assert r_eval_ok.status_code == status.HTTP_200_OK
-        assert_std_headers(r_eval_ok, "4")
-
-        r_eval_bad = self.client.post(
-            "/judge/evaluate", {"pairs": []}, format="json", REMOTE_ADDR="192.0.2.104"
-        )
-        assert r_eval_bad.status_code == status.HTTP_400_BAD_REQUEST
-        assert_std_headers(r_eval_bad, "3")
-
-        for _ in range(3):
-            self.client.post(
-                "/judge/evaluate", eval_payload, format="json", REMOTE_ADDR="192.0.2.104"
-            )
-        r_eval_429 = self.client.post(
-            "/judge/evaluate", eval_payload, format="json", REMOTE_ADDR="192.0.2.104"
-        )
-        assert r_eval_429.status_code == status.HTTP_429_TOO_MANY_REQUESTS
-        assert_std_headers(r_eval_429, "0")
-        assert int(r_eval_429.headers["Retry-After"]) >= 1
 
     @pytest.mark.parametrize("bad_id", ["bad\tid", "日本語id", "bad\r\nid"])
     def test_invalid_request_id_replaced_with_uuid4_including_400(self, bad_id: str):

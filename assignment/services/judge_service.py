@@ -1,6 +1,6 @@
 """
-Service layer orchestrating cache lookup, Tier 1/2/3 NLI evaluation, atomic
-deduplicated persistence (safe under 30+ parallel writes), and accuracy stats.
+Service layer orchestrating cache lookup, Tier 1/2/3 NLI evaluation, and atomic
+deduplicated persistence (safe under 30+ parallel writes).
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ from dataclasses import dataclass
 
 from django.conf import settings
 from django.db import IntegrityError, connection, transaction
-from django.db.models import Avg, Count
 
 from assignment.models import JudgmentRecord, RequestAuditLog
 from assignment.services.nli_engine import (
@@ -445,125 +444,3 @@ def judge_bulk(pairs: list[tuple[str, str]]) -> list[JudgmentOutput]:
             )
 
     return [computed_by_hash[pair_hash] for pair_hash, _, _ in hashed_items]
-
-
-def compute_stats() -> dict:
-    """Aggregate judgment statistics, tier usage, and audit log metrics (F3)."""
-    total = JudgmentRecord.objects.count()
-    label_counts = {
-        row["label"]: row["cnt"]
-        for row in JudgmentRecord.objects.values("label").annotate(cnt=Count("id"))
-    }
-    tier_counts = {
-        row["tier_used"]: row["cnt"]
-        for row in JudgmentRecord.objects.values("tier_used").annotate(cnt=Count("id"))
-    }
-    avg_score = JudgmentRecord.objects.aggregate(avg=Avg("score"))["avg"]
-
-    total_requests = RequestAuditLog.objects.count()
-    rate_limited_requests = RequestAuditLog.objects.filter(rate_limited=True).count()
-    avg_latency_ms = RequestAuditLog.objects.aggregate(avg=Avg("latency_ms"))["avg"]
-
-    labeled_qs = JudgmentRecord.objects.exclude(expected_label__isnull=True).exclude(
-        expected_label=""
-    )
-    labeled_count = labeled_qs.count()
-    stored_accuracy = None
-    if labeled_count > 0:
-        correct = sum(
-            1
-            for rec in labeled_qs.only("label", "expected_label")
-            if rec.label == rec.expected_label
-        )
-        stored_accuracy = round(correct / labeled_count, 4)
-
-    return {
-        "total_judgments": total,
-        "label_distribution": {
-            "ENTAIL": label_counts.get(JudgmentRecord.LABEL_ENTAIL, 0),
-            "NO_ENTAIL": label_counts.get(JudgmentRecord.LABEL_NO_ENTAIL, 0),
-        },
-        "tier_distribution": tier_counts,
-        "average_score": round(float(avg_score), 4) if avg_score is not None else None,
-        "stored_ground_truth_count": labeled_count,
-        "stored_accuracy": stored_accuracy,
-        "audit": {
-            "total_requests": total_requests,
-            "rate_limited_requests": rate_limited_requests,
-            "average_latency_ms": (
-                round(float(avg_latency_ms), 2) if avg_latency_ms is not None else None
-            ),
-        },
-    }
-
-
-def _update_expected_labels(updates: list[tuple[str, EntailmentLabel]]) -> None:
-    """Persist ground-truth expected_label annotations safely on SQLite and Postgres."""
-    if not updates:
-        return
-
-    def _do_update() -> None:
-        with transaction.atomic():
-            for pair_hash, expected in updates:
-                JudgmentRecord.objects.filter(pair_hash=pair_hash).update(expected_label=expected)
-
-    _run_sqlite_write(_do_update)
-
-
-def evaluate_ground_truth(
-    labeled_pairs: list[tuple[str, str, EntailmentLabel]],
-) -> dict:
-    """
-    Evaluate predicted entailment labels against ground-truth expected labels and
-    compute accuracy, precision, recall, F1, and confusion matrix (F3 deliverable).
-    """
-    raw_pairs = [(s1, s2) for s1, s2, _ in labeled_pairs]
-    predictions = judge_bulk(raw_pairs)
-
-    tp = fp = tn = fn = 0
-    results = []
-    expected_updates: list[tuple[str, EntailmentLabel]] = []
-
-    for (s1, s2, expected), pred in zip(labeled_pairs, predictions, strict=True):
-        pair_hash, _, _ = compute_pair_hash(s1, s2)
-        expected_updates.append((pair_hash, expected))
-        is_correct = pred.label == expected
-        if expected == "ENTAIL" and pred.label == "ENTAIL":
-            tp += 1
-        elif expected == "NO_ENTAIL" and pred.label == "ENTAIL":
-            fp += 1
-        elif expected == "NO_ENTAIL" and pred.label == "NO_ENTAIL":
-            tn += 1
-        elif expected == "ENTAIL" and pred.label == "NO_ENTAIL":
-            fn += 1
-
-        results.append(
-            {
-                "sentence1": s1,
-                "sentence2": s2,
-                "expected_label": expected,
-                "predicted_label": pred.label,
-                "score": pred.score,
-                "correct": is_correct,
-                "tier_used": pred.tier_used,
-            }
-        )
-
-    _update_expected_labels(expected_updates)
-
-    total = len(labeled_pairs)
-    accuracy = round((tp + tn) / total, 4) if total else 0.0
-    precision = round(tp / (tp + fp), 4) if (tp + fp) else 0.0
-    recall = round(tp / (tp + fn), 4) if (tp + fn) else 0.0
-    f1 = round(2 * precision * recall / (precision + recall), 4) if (precision + recall) else 0.0
-
-    return {
-        "total": total,
-        "correct": tp + tn,
-        "accuracy": accuracy,
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
-        "confusion_matrix": {"tp": tp, "fp": fp, "tn": tn, "fn": fn},
-        "results": results,
-    }

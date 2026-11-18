@@ -17,13 +17,10 @@ from assignment.models import RequestAuditLog
 from assignment.rate_limit import get_client_ip, rate_limiter
 from assignment.serializers import (
     BulkJudgeWrapperSerializer,
-    EvaluateRequestSerializer,
     JudgePairSerializer,
 )
 from assignment.services.judge_service import (
     _SQLITE_WRITE_LOCK,
-    compute_stats,
-    evaluate_ground_truth,
     judge_bulk,
     judge_single,
     prune_storage_if_needed,
@@ -283,59 +280,6 @@ class JudgeBulkView(_BaseJudgeView):
             [{"label": out.label, "score": out.score} for out in outputs],
             status=status.HTTP_200_OK,
         )
-
-
-class JudgeStatsView(_BaseJudgeView):
-    """GET /judge/stats — Aggregate judgment metrics, latency, and accuracy summary (F3)."""
-
-    def get(self, request):
-        started = self._get_started_at(request)
-        client_ip, limited = self._check_rate_limit(request, started)
-        if limited is not None:
-            return limited
-
-        stats = compute_stats()
-        _record_audit(
-            request,
-            client_ip=client_ip,
-            status_code=status.HTTP_200_OK,
-            started_at=started,
-        )
-        return Response(stats, status=status.HTTP_200_OK)
-
-
-class JudgeEvaluateView(_BaseJudgeView):
-    """POST /judge/evaluate — Evaluate against ground-truth pairs and return accuracy/F1 (F3)."""
-
-    def post(self, request):
-        started = self._get_started_at(request)
-        client_ip, limited = self._check_rate_limit(request, started)
-        if limited is not None:
-            return limited
-
-        serializer = EvaluateRequestSerializer(data=request.data)
-        if not serializer.is_valid():
-            _record_audit(
-                request,
-                client_ip=client_ip,
-                status_code=status.HTTP_400_BAD_REQUEST,
-                started_at=started,
-            )
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        labeled = [
-            (item["sentence1"], item["sentence2"], item["expected_label"])
-            for item in serializer.validated_data["pairs"]
-        ]
-        report = evaluate_ground_truth(labeled)
-        _record_audit(
-            request,
-            client_ip=client_ip,
-            status_code=status.HTTP_200_OK,
-            started_at=started,
-            payload_chars=sum(len(s1) + len(s2) for s1, s2, _ in labeled),
-        )
-        return Response(report, status=status.HTTP_200_OK)
 
 
 @api_view(["GET"])
