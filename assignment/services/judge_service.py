@@ -9,6 +9,7 @@ import hashlib
 import threading
 from dataclasses import dataclass
 
+from django.conf import settings
 from django.db import IntegrityError, connection, transaction
 from django.db.models import Avg, Count
 
@@ -19,7 +20,7 @@ from assignment.services.normalizer import evaluate_tier1, normalize_sentence
 # Serialize writes when running on SQLite so 30 concurrent writer threads
 # never collide on SQLite's single-writer file lock. PostgreSQL handles
 # concurrent row/index locking natively via MVCC + unique constraint.
-_SQLITE_WRITE_LOCK = threading.Lock()
+_SQLITE_WRITE_LOCK = threading.RLock()
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,45 @@ def compute_pair_hash(sentence1: str, sentence2: str) -> tuple[str, str, str]:
     return digest, norm1, norm2
 
 
+def _prune_table(model_cls, max_rows: int) -> None:
+    """Delete oldest rows by (created_at, id) when table size exceeds max_rows."""
+    if max_rows < 0:
+        return
+    total = model_cls.objects.count()
+    if total <= max_rows:
+        return
+    if max_rows == 0:
+        model_cls.objects.all().delete()
+        return
+
+    excess = total - max_rows
+    while excess > 0:
+        batch_size = min(excess, 500)
+        oldest_ids = list(
+            model_cls.objects.order_by("created_at", "id").values_list("id", flat=True)[:batch_size]
+        )
+        if not oldest_ids:
+            break
+        model_cls.objects.filter(id__in=oldest_ids).delete()
+        excess -= len(oldest_ids)
+
+
+def prune_storage_if_needed() -> None:
+    """Enforce bounded storage limits on JudgmentRecord and RequestAuditLog."""
+    max_judgments = int(getattr(settings, "MAX_STORED_JUDGMENTS", 10000))
+    max_audit_logs = int(getattr(settings, "MAX_AUDIT_LOGS", 50000))
+
+    def _do_prune():
+        _prune_table(JudgmentRecord, max_judgments)
+        _prune_table(RequestAuditLog, max_audit_logs)
+
+    if connection.vendor == "sqlite":
+        with _SQLITE_WRITE_LOCK:
+            _do_prune()
+    else:
+        _do_prune()
+
+
 def _persist_records_safely(records_to_create: list[JudgmentRecord]) -> None:
     """
     Persist newly computed JudgmentRecord objects idempotently under concurrent writes.
@@ -44,6 +84,8 @@ def _persist_records_safely(records_to_create: list[JudgmentRecord]) -> None:
     """
     if not records_to_create:
         return
+
+    max_judgments = int(getattr(settings, "MAX_STORED_JUDGMENTS", 10000))
 
     def _do_write():
         for rec in records_to_create:
@@ -54,8 +96,6 @@ def _persist_records_safely(records_to_create: list[JudgmentRecord]) -> None:
                         defaults={
                             "sentence1": rec.sentence1,
                             "sentence2": rec.sentence2,
-                            "normalized_s1": rec.normalized_s1,
-                            "normalized_s2": rec.normalized_s2,
                             "label": rec.label,
                             "score": rec.score,
                             "tier_used": rec.tier_used,
@@ -65,6 +105,7 @@ def _persist_records_safely(records_to_create: list[JudgmentRecord]) -> None:
             except IntegrityError:
                 # Another concurrent transaction inserted this exact pair_hash first.
                 pass
+        _prune_table(JudgmentRecord, max_judgments)
 
     if connection.vendor == "sqlite":
         with _SQLITE_WRITE_LOCK:
@@ -136,8 +177,6 @@ def judge_bulk(pairs: list[tuple[str, str]]) -> list[JudgmentOutput]:
                     pair_hash=pair_hash,
                     sentence1=s1,
                     sentence2=s2,
-                    normalized_s1=norm1,
-                    normalized_s2=norm2,
                     label=out.label,
                     score=out.score,
                     tier_used=out.tier_used,
@@ -167,8 +206,6 @@ def judge_bulk(pairs: list[tuple[str, str]]) -> list[JudgmentOutput]:
                     pair_hash=pair_hash,
                     sentence1=s1,
                     sentence2=s2,
-                    normalized_s1=norm1,
-                    normalized_s2=norm2,
                     label=out.label,
                     score=out.score,
                     tier_used=out.tier_used,

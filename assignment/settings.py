@@ -118,3 +118,6 @@ OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
 RATE_LIMIT_REQUESTS = int(os.environ.get("RATE_LIMIT_REQUESTS", "5"))
 RATE_LIMIT_WINDOW_SECONDS = float(os.environ.get("RATE_LIMIT_WINDOW_SECONDS", "1.0"))
+
+MAX_STORED_JUDGMENTS = int(os.environ.get("MAX_STORED_JUDGMENTS", "10000"))
+MAX_AUDIT_LOGS = int(os.environ.get("MAX_AUDIT_LOGS", "50000"))

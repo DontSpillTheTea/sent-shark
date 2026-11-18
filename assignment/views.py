@@ -23,6 +23,7 @@ from assignment.services.judge_service import (
     evaluate_ground_truth,
     judge_bulk,
     judge_single,
+    prune_storage_if_needed,
 )
 
 logger = logging.getLogger(__name__)
@@ -37,28 +38,25 @@ def _record_audit(
     rate_limited: bool = False,
 ) -> None:
     latency_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
+
+    def _write():
+        RequestAuditLog.objects.create(
+            client_ip=client_ip[:64],
+            method=request.method[:10],
+            path=request.path[:255],
+            status_code=status_code,
+            payload_chars=payload_chars,
+            latency_ms=latency_ms,
+            rate_limited=rate_limited,
+        )
+        prune_storage_if_needed()
+
     try:
         if connection.vendor == "sqlite":
             with _SQLITE_WRITE_LOCK:
-                RequestAuditLog.objects.create(
-                    client_ip=client_ip[:64],
-                    method=request.method[:10],
-                    path=request.path[:255],
-                    status_code=status_code,
-                    payload_chars=payload_chars,
-                    latency_ms=latency_ms,
-                    rate_limited=rate_limited,
-                )
+                _write()
         else:
-            RequestAuditLog.objects.create(
-                client_ip=client_ip[:64],
-                method=request.method[:10],
-                path=request.path[:255],
-                status_code=status_code,
-                payload_chars=payload_chars,
-                latency_ms=latency_ms,
-                rate_limited=rate_limited,
-            )
+            _write()
     except Exception as exc:
         logger.warning("Failed to write RequestAuditLog: %s", exc)
 

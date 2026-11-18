@@ -35,12 +35,11 @@ class JudgmentRecord(models.Model):
     pair_hash = models.CharField(max_length=64, unique=True, db_index=True)
     sentence1 = models.TextField()
     sentence2 = models.TextField()
-    normalized_s1 = models.TextField()
-    normalized_s2 = models.TextField()
     label = models.CharField(max_length=16, choices=LABEL_CHOICES, db_index=True)
     score = models.FloatField()
     tier_used = models.CharField(max_length=32, choices=TIER_CHOICES, default=TIER_NLI)
     expected_label = models.CharField(max_length=16, choices=LABEL_CHOICES, null=True, blank=True)
+    hit_count = models.PositiveIntegerField(default=1)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 
