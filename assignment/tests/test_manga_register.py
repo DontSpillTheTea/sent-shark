@@ -5,6 +5,7 @@ from rest_framework.test import APIClient
 from assignment.rate_limit import rate_limiter
 
 
+@pytest.mark.integration
 @pytest.mark.django_db
 class TestMangaDialogueRegisters:
     """

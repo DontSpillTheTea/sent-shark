@@ -15,6 +15,7 @@ class TestJudgeAPI:
     def teardown_method(self):
         rate_limiter.reset()
 
+    @pytest.mark.integration
     def test_f1_prompt_example_entailment(self):
         response = self.client.post(
             "/judge",
@@ -27,6 +28,7 @@ class TestJudgeAPI:
         assert JudgmentRecord.objects.count() == 1
         assert RequestAuditLog.objects.filter(status_code=200).count() == 1
 
+    @pytest.mark.integration
     def test_f1_english_paraphrase_and_contradiction_and_neutral(self):
         entail = self.client.post(
             "/judge",
@@ -77,6 +79,7 @@ class TestJudgeAPI:
         )
         assert cross_resp.status_code == status.HTTP_400_BAD_REQUEST
 
+    @pytest.mark.integration
     def test_f2_bulk_raw_list_and_wrapped_payload_up_to_100(self):
         pairs = [
             {"sentence1": "私は猫が大好きだ。", "sentence2": "猫が好きです。"},
@@ -124,7 +127,26 @@ class TestJudgeAPI:
         resp_over = self.client.post("/judge/bulk", {"pairs": too_many}, format="json")
         assert resp_over.status_code == status.HTTP_400_BAD_REQUEST
 
-    def test_unrequired_stats_evaluate_and_v1_judge_aliases_removed(self):
+    def test_unrequired_stats_evaluate_and_v1_judge_aliases_removed(self, monkeypatch):
+        from assignment.services import nli_engine as nli_mod
+
+        monkeypatch.setattr(
+            nli_mod.nli_engine,
+            "score_pairs_batch",
+            lambda pairs, tier1_results=None, scoring_mode="mean": [
+                nli_mod.NLIScoreDetail(
+                    score=0.92,
+                    label="ENTAIL",
+                    tier_used="tier2_nli",
+                    forward_entail=0.93,
+                    reverse_entail=0.91,
+                    max_contradiction=0.02,
+                    forward_contradict=0.02,
+                    reverse_contradict=0.01,
+                )
+                for _ in pairs
+            ],
+        )
         assert self.client.get("/judge/stats").status_code == status.HTTP_404_NOT_FOUND
         assert self.client.get("/judge/stats/").status_code == status.HTTP_404_NOT_FOUND
         assert (

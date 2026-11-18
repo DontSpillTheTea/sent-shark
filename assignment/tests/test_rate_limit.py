@@ -11,6 +11,28 @@ from assignment.rate_limit import get_client_ip, rate_limiter
 
 @pytest.mark.django_db
 class TestRateLimit:
+    @pytest.fixture(autouse=True)
+    def _mock_nli_engine(self, monkeypatch):
+        from assignment.services import nli_engine as nli_mod
+
+        monkeypatch.setattr(
+            nli_mod.nli_engine,
+            "score_pairs_batch",
+            lambda pairs, tier1_results=None, scoring_mode="mean": [
+                nli_mod.NLIScoreDetail(
+                    score=0.92,
+                    label="ENTAIL",
+                    tier_used="tier2_nli",
+                    forward_entail=0.93,
+                    reverse_entail=0.91,
+                    max_contradiction=0.02,
+                    forward_contradict=0.02,
+                    reverse_contradict=0.01,
+                )
+                for _ in pairs
+            ],
+        )
+
     def setup_method(self):
         self.client = APIClient()
         rate_limiter.reset()

@@ -51,7 +51,26 @@ def test_playground_rejects_non_get_methods():
 
 
 @pytest.mark.django_db
-def test_judge_single_still_works_after_playground():
+def test_judge_single_still_works_after_playground(monkeypatch):
+    from assignment.services import nli_engine as nli_mod
+
+    monkeypatch.setattr(
+        nli_mod.nli_engine,
+        "score_pairs_batch",
+        lambda pairs, tier1_results=None, scoring_mode="mean": [
+            nli_mod.NLIScoreDetail(
+                score=0.92,
+                label="ENTAIL",
+                tier_used="tier2_nli",
+                forward_entail=0.93,
+                reverse_entail=0.91,
+                max_contradiction=0.02,
+                forward_contradict=0.02,
+                reverse_contradict=0.01,
+            )
+            for _ in pairs
+        ],
+    )
     client = APIClient()
     get_resp = client.get("/playground")
     assert get_resp.status_code == status.HTTP_200_OK

@@ -125,6 +125,7 @@ def test_gauntlet_fixture_has_60_stratified_pairs():
         assert diff_langs[diff]["ja"] > 0 and diff_langs[diff]["en"] > 0
 
 
+@pytest.mark.integration
 @pytest.mark.django_db
 def test_run_eval_management_command_produces_provenance_report():
     assert JudgmentRecord.objects.count() == 0
@@ -192,6 +193,7 @@ def test_run_eval_management_command_produces_provenance_report():
     assert hybrid["accuracy"] >= modes["tier2"]["accuracy"]
 
 
+@pytest.mark.integration
 @pytest.mark.django_db
 def test_run_eval_default_markdown_output_does_not_mutate_db():
     assert JudgmentRecord.objects.count() == 0
@@ -212,6 +214,7 @@ def test_run_eval_raises_command_error_for_missing_fixture(tmp_path):
         call_command("run_eval", "--fixture", str(missing_path))
 
 
+@pytest.mark.integration
 def test_run_tier2_mode_scores_raw_normalized_inputs_without_rewrites(monkeypatch):
     from assignment.management.commands.run_eval import _run_tier2_mode
     from assignment.services import nli_engine as nli_mod
@@ -393,6 +396,7 @@ def test_holdout_fixture_and_provenance_are_valid_and_disjoint_from_dev():
     assert isinstance(pawsx["citation"], str) and pawsx["citation"].strip()
 
 
+@pytest.mark.integration
 @pytest.mark.django_db
 def test_run_eval_supports_scoring_modes_and_provenance_metadata():
     assert JudgmentRecord.objects.count() == 0
@@ -488,8 +492,12 @@ def test_run_eval_supports_scoring_modes_and_provenance_metadata():
     assert "jglue_jnli" in md
     assert "paws_x" in md
 
+    from assignment.management.commands.run_eval import _get_model_revision
 
-def test_wilson_confidence_interval_and_diagnostics_schema(tmp_path):
+    assert _get_model_revision("nonexistent/other-model-xyz") == "unknown"
+
+
+def test_wilson_confidence_interval_and_diagnostics_schema(tmp_path, monkeypatch):
     from assignment.management.commands.run_eval import (
         DEFAULT_FINAL_HOLDOUT_PATH,
         _classify_error_category,
@@ -540,7 +548,7 @@ def test_wilson_confidence_interval_and_diagnostics_schema(tmp_path):
     assert _classify_error_category({"phenomenon": "temporal_shift"}) == "other"
 
     # _get_model_revision must not return global singleton's revision for a different model_name
-    nli_engine.warm_up()
+    monkeypatch.setattr(nli_engine, "model_revision", "fake-global-revision")
     assert _get_model_revision("nonexistent/other-model-xyz") == "unknown"
 
     ds_name, ds_path = _resolve_fixture("final_holdout", None)
@@ -567,6 +575,7 @@ def test_wilson_confidence_interval_and_diagnostics_schema(tmp_path):
         _load_and_validate_fixture(bad_fixture)
 
 
+@pytest.mark.integration
 @pytest.mark.django_db
 def test_run_eval_supports_ablation_and_misclassification_diagnostics(tmp_path, monkeypatch):
     from assignment.management.commands import run_eval as run_eval_cmd

@@ -46,7 +46,26 @@ def test_pair_hash_policy_version_and_normalization_invariants(settings):
 
 
 @pytest.mark.django_db
-def test_symmetric_calls_share_single_db_row_and_identical_score(client):
+def test_symmetric_calls_share_single_db_row_and_identical_score(client, monkeypatch):
+    from assignment.services import nli_engine as nli_mod
+
+    monkeypatch.setattr(
+        nli_mod.nli_engine,
+        "score_pairs_batch",
+        lambda pairs, tier1_results=None, scoring_mode="mean": [
+            nli_mod.NLIScoreDetail(
+                score=0.91,
+                label="ENTAIL",
+                tier_used="tier2_nli",
+                forward_entail=0.92,
+                reverse_entail=0.9,
+                max_contradiction=0.02,
+                forward_contradict=0.02,
+                reverse_contradict=0.01,
+            )
+            for _ in pairs
+        ],
+    )
     s1 = "雨が降っているので、傘を持っていく。"
     s2 = "雨天のため、傘を持参する。"
     r1 = client.post(
@@ -95,6 +114,23 @@ def test_writes_do_not_prune_judgments_or_audit_logs(client, settings):
 def test_symmetric_pair_hits_hot_cache_without_recomputing(monkeypatch):
     from assignment.services import nli_engine as nli_mod
 
+    monkeypatch.setattr(
+        nli_mod.nli_engine,
+        "score_pairs_batch",
+        lambda pairs, tier1_results=None, scoring_mode="mean": [
+            nli_mod.NLIScoreDetail(
+                score=0.91,
+                label="ENTAIL",
+                tier_used="tier2_nli",
+                forward_entail=0.92,
+                reverse_entail=0.9,
+                max_contradiction=0.02,
+                forward_contradict=0.02,
+                reverse_contradict=0.01,
+            )
+            for _ in pairs
+        ],
+    )
     s1 = "雨が降っているので、傘を持っていく。"
     s2 = "雨天のため、傘を持参する。"
     first = judge_single(s1, s2)

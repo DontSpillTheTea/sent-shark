@@ -61,6 +61,7 @@ def test_removed_tier1_heuristic_helpers_absent():
         assert not hasattr(normalizer, removed_name)
 
 
+@pytest.mark.integration
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     ("sentence1", "sentence2", "expected"),
@@ -83,6 +84,7 @@ def test_nli_end_to_end_paraphrases_contradictions_and_hypernyms(sentence1, sent
     assert res.label == expected
 
 
+@pytest.mark.integration
 def test_nli_batch_deduplicates_identical_and_swapped_directional_pairs(monkeypatch):
     from assignment.services.nli_engine import nli_engine
 
@@ -146,6 +148,7 @@ def test_settings_optional_int_env_error_context(monkeypatch):
         _optional_int_env("TEST_NLI_INDEX")
 
 
+@pytest.mark.integration
 @pytest.mark.django_db
 def test_evaluate_uncached_pairs_and_nli_warm_up_without_db_mutation():
     from assignment.models import JudgmentRecord
