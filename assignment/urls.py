@@ -10,6 +10,7 @@ from assignment.views import (
     UserViewSet,
     health_check,
     initialize_data,
+    playground_view,
 )
 
 router = DefaultRouter()
@@ -19,6 +20,8 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("health", health_check, name="health"),
     path("health/", health_check),
+    path("playground", playground_view, name="playground"),
+    path("playground/", playground_view, name="playground-slash"),
     path("init_data/", initialize_data, name="initialize_data"),
     # Canonical F1-F3 endpoints (with & without trailing slash)
     path("judge", JudgeSingleView.as_view(), name="judge-single"),

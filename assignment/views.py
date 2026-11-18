@@ -6,6 +6,8 @@ import uuid
 from django.conf import settings
 from django.core.management import call_command
 from django.db import connection
+from django.shortcuts import render
+from django.views.decorators.http import require_GET
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view
 from rest_framework.response import Response
@@ -339,6 +341,12 @@ class JudgeEvaluateView(_BaseJudgeView):
 @api_view(["GET"])
 def health_check(request):
     return Response({"status": "ok"}, status=status.HTTP_200_OK)
+
+
+@require_GET
+def playground_view(request):
+    """Render the dependency-free developer playground for POST /judge."""
+    return render(request, "assignment/playground.html")
 
 
 @api_view(["POST"])
