@@ -16,9 +16,13 @@ from django.db import IntegrityError, connection, transaction
 from django.db.models import Avg, Count
 
 from assignment.models import JudgmentRecord, RequestAuditLog
-from assignment.services.nli_engine import EscalationJudgeProtocol, nli_engine
+from assignment.services.nli_engine import (
+    EscalationJudgeProtocol,
+    _validate_scoring_mode,
+    nli_engine,
+)
 from assignment.services.normalizer import Tier1Result, evaluate_tier1, normalize_sentence
-from assignment.types import EntailmentLabel, TierName
+from assignment.types import EntailmentLabel, ScoringMode, TierName
 
 # Serialize writes when running on SQLite so 30 concurrent writer threads
 # never collide on SQLite's single-writer file lock. PostgreSQL handles
@@ -274,11 +278,13 @@ def judge_single(sentence1: str, sentence2: str) -> JudgmentOutput:
 def evaluate_uncached_pairs(
     pairs: list[tuple[str, str]],
     escalation_judge: EscalationJudgeProtocol | None = None,
+    scoring_mode: ScoringMode = "mean",
 ) -> list[JudgmentOutput]:
     """
     Pure Tier 1 fast-gate + batched Tier 2/3 NLI evaluation without cache or DB side effects.
     Shared by both judge_bulk (after cache/singleflight filtering) and offline evaluation.
     """
+    _validate_scoring_mode(scoring_mode)
     if not pairs:
         return []
 
@@ -300,10 +306,13 @@ def evaluate_uncached_pairs(
     if unresolved_for_tier2:
         nli_inputs = [(s1, s2) for _, s1, s2, _ in unresolved_for_tier2]
         t1_list = [t1 for _, _, _, t1 in unresolved_for_tier2]
+        score_kwargs: dict[str, object] = {"escalation_judge": escalation_judge}
+        if scoring_mode != "mean":
+            score_kwargs["scoring_mode"] = scoring_mode
         nli_details = nli_engine.score_pairs_batch(
             nli_inputs,
             t1_list,
-            escalation_judge=escalation_judge,
+            **score_kwargs,
         )
 
         for (idx, _s1, _s2, _), detail in zip(unresolved_for_tier2, nli_details, strict=True):

@@ -1,0 +1,59 @@
+{
+  "dataset": "sent-shark Independent Held-Out Bilingual Bidirectional Entailment Benchmark",
+  "total_pairs": 60,
+  "sampling_seed": 42,
+  "sampling_method": "Stratified deterministic random.Random(42) sampling over candidate pools sorted by (sentence1, sentence2) for JGLUE JNLI and integer row id for PAWS-X, after excluding normalized overlaps with eval_gauntlet.json.",
+  "by_language": {
+    "ja": 40,
+    "en": 20
+  },
+  "by_label": {
+    "ENTAIL": 30,
+    "NO_ENTAIL": 30
+  },
+  "strata_counts": {
+    "bidir_entail": 20,
+    "oneway_entail": 7,
+    "contradict": 7,
+    "neutral": 6,
+    "paraphrase": 10,
+    "adversarial_swap": 10
+  },
+  "label_mapping_rules": {
+    "jglue_jnli": {
+      "bidir_entail": "Both (s1 -> s2) and (s2 -> s1) labeled entailment -> ENTAIL",
+      "oneway_entail": "Exactly one direction labeled entailment and reverse labeled neutral or contradiction (stored as premise -> hypothesis in the entailment direction) -> NO_ENTAIL",
+      "contradict": "Neither direction labeled entailment and at least one direction labeled contradiction -> NO_ENTAIL",
+      "neutral": "Both directions labeled neutral -> NO_ENTAIL"
+    },
+    "paws_x": {
+      "paraphrase": "PAWS-X en/test label == 1 (paraphrase) -> ENTAIL",
+      "adversarial_swap": "PAWS-X en/test label == 0 (non-paraphrase / adversarial word-order swap) -> NO_ENTAIL"
+    }
+  },
+  "sources": {
+    "jglue_jnli": {
+      "dataset_name": "JGLUE (Japanese General Language Understanding Evaluation) — JNLI v1.3 test split",
+      "source_url": "https://raw.githubusercontent.com/yahoojapan/JGLUE/6f071c09316baae89c3d083a90985b4b1cb9968c/datasets/jnli-v1.3/test-v1.3.json",
+      "repository_url": "https://github.com/yahoojapan/JGLUE",
+      "commit_sha": "6f071c09316baae89c3d083a90985b4b1cb9968c",
+      "license": "CC BY-SA 4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "citation": "Kurihara, K., Kawahara, D., & Shibata, T. (2022). JGLUE: Japanese General Language Understanding Evaluation. In Proceedings of LREC 2022 (pp. 2957-2966). https://aclanthology.org/2022.lrec-1.317",
+      "raw_split_rows": 2508,
+      "sampled_count": 40
+    },
+    "paws_x": {
+      "dataset_name": "PAWS-X (Cross-lingual Adversarial Dataset for Paraphrase Identification) — en/test split",
+      "source_url": "https://huggingface.co/datasets/google-research-datasets/paws-x",
+      "api_url": "https://datasets-server.huggingface.co/rows?dataset=google-research-datasets/paws-x&config=en&split=test",
+      "commit_sha": "4cd8187c404b",
+      "full_commit_sha": "4cd8187c404bda33cb1f62b49b001115862acf37",
+      "license": "Permissive free use with Google LLC attribution",
+      "license_notes": "The dataset may be freely used for any purpose, although acknowledgement of Google LLC (\"Google\") as the data source would be appreciated. Provided \"AS IS\" without any warranty.",
+      "citation": "Yang, Y., Zhang, Y., Tar, C., & Baldridge, J. (2019). PAWS-X: A Cross-lingual Adversarial Dataset for Paraphrase Identification. In Proceedings of EMNLP 2019.",
+      "raw_split_rows": 2000,
+      "sampled_count": 20
+    }
+  }
+}

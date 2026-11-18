@@ -12,6 +12,7 @@ import threading
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 from django.conf import settings
@@ -22,9 +23,50 @@ from assignment.services.normalizer import (
     normalize_lexical_surface,
     normalize_sentence,
 )
-from assignment.types import EntailmentLabel, TierName
+from assignment.types import EntailmentLabel, ScoringMode, TierName
 
 logger = logging.getLogger(__name__)
+
+NLI_MAX_LENGTH = 256
+NLI_BATCH_SIZE = 64  # 32 directional sentence pairs (64 directional inputs) per pass
+NLI_CONTRADICT_CAP = 0.35
+NLI_LEXICAL_CONTRADICT_CAP = 0.25
+NLI_DIRECTIONAL_HIGH = 0.70
+NLI_DIRECTIONAL_LOW = 0.15
+
+
+def _validate_scoring_mode(scoring_mode: ScoringMode) -> None:
+    if scoring_mode not in ("mean", "min"):
+        raise ValueError(f"Unsupported scoring_mode: {scoring_mode!r}")
+
+
+def _aggregate_entailment(
+    p_entail_fwd: float,
+    p_entail_rev: float,
+    scoring_mode: ScoringMode,
+) -> float:
+    """Aggregate bidirectional entailment probabilities via mean or min."""
+    _validate_scoring_mode(scoring_mode)
+    if scoring_mode == "min":
+        return min(p_entail_fwd, p_entail_rev)
+    return 0.5 * (p_entail_fwd + p_entail_rev)
+
+
+def _resolve_hf_model_revision(model_name: str, model_config=None) -> str | None:
+    """Resolve model commit revision from Transformers config or local HF cache snapshot."""
+    commit_hash = getattr(model_config, "_commit_hash", None) if model_config is not None else None
+    if isinstance(commit_hash, str) and commit_hash:
+        return commit_hash
+    try:
+        if Path(model_name).is_dir():
+            return None
+        from huggingface_hub import snapshot_download
+
+        snapshot_path = snapshot_download(model_name, local_files_only=True)
+        rev = Path(snapshot_path).name
+        return rev or None
+    except Exception:
+        return None
 
 
 @dataclass(frozen=True)
@@ -136,6 +178,12 @@ class HuggingFaceNLIEngine:
 
     def get_model_revision(self) -> str | None:
         """Return the loaded HuggingFace model revision commit hash, if available."""
+        if self.model_revision:
+            return self.model_revision
+        if self._model is not None:
+            self.model_revision = _resolve_hf_model_revision(
+                self.model_name, getattr(self._model, "config", None)
+            )
         return self.model_revision
 
     @staticmethod
@@ -263,10 +311,7 @@ class HuggingFaceNLIEngine:
                 model.eval()
 
                 entail_idx, contradict_idx = self._resolve_label_indices(model.config)
-                commit_hash = getattr(model.config, "_commit_hash", None)
-                model_revision = (
-                    commit_hash if isinstance(commit_hash, str) and commit_hash else None
-                )
+                model_revision = _resolve_hf_model_revision(self.model_name, model.config)
 
                 self._tokenizer = tokenizer
                 self._model = model
@@ -302,7 +347,10 @@ class HuggingFaceNLIEngine:
         return True
 
     def _pair_metrics(
-        self, probs_all: list[list[float]], pair_idx: int
+        self,
+        probs_all: list[list[float]],
+        pair_idx: int,
+        scoring_mode: ScoringMode = "mean",
     ) -> tuple[float, float, float, float]:
         """Compute forward entailment, reverse entailment, max contradiction, and base score."""
         fwd = probs_all[2 * pair_idx]
@@ -313,7 +361,8 @@ class HuggingFaceNLIEngine:
             float(fwd[self._contradict_idx]),
             float(rev[self._contradict_idx]),
         )
-        base_score = 0.5 * (p_entail_fwd + p_entail_rev) * (1.0 - p_contra_max)
+        entail_signal = _aggregate_entailment(p_entail_fwd, p_entail_rev, scoring_mode)
+        base_score = entail_signal * (1.0 - p_contra_max)
         return p_entail_fwd, p_entail_rev, p_contra_max, base_score
 
     @staticmethod
@@ -321,25 +370,27 @@ class HuggingFaceNLIEngine:
         raw_metrics: tuple[float, float, float, float],
         canon_metrics: tuple[float, float, float, float] | None,
         fallback_score: float,
+        scoring_mode: ScoringMode = "mean",
     ) -> tuple[float, float, float, float]:
         """
         Fuse raw and canonical NLI passes and apply non-contradiction lexical calibration.
         Guards against boosting directional hypernym pairs (strong forward/reverse asymmetry).
         """
+        _validate_scoring_mode(scoring_mode)
         raw_fwd, raw_rev, raw_contra, raw_score = raw_metrics
         if canon_metrics is None:
             p_entail_fwd, p_entail_rev, p_contra_max, nli_score = raw_metrics
         else:
             can_fwd, can_rev, can_contra, can_score = canon_metrics
-            if can_contra >= 0.35 and can_score < raw_score:
+            if can_contra >= NLI_CONTRADICT_CAP and can_score < raw_score:
                 # Canonicalization exposed a contradiction masked by phrasal variants
                 p_entail_fwd, p_entail_rev, p_contra_max, nli_score = canon_metrics
             elif (
-                can_contra < 0.15
+                can_contra < NLI_DIRECTIONAL_LOW
                 and can_score >= 0.75
                 and min(can_fwd, can_rev) >= 0.50
                 and raw_score < 0.50
-                and raw_contra < 0.35
+                and raw_contra < NLI_CONTRADICT_CAP
             ):
                 # Canonicalization resolved lexical synonyms where raw MiniLM misfired
                 p_entail_fwd, p_entail_rev, p_contra_max, nli_score = canon_metrics
@@ -347,17 +398,19 @@ class HuggingFaceNLIEngine:
                 p_entail_fwd = 0.5 * (raw_fwd + can_fwd)
                 p_entail_rev = 0.5 * (raw_rev + can_rev)
                 p_contra_max = max(raw_contra, can_contra)
-                nli_score = 0.5 * (p_entail_fwd + p_entail_rev) * (1.0 - p_contra_max)
+                entail_signal = _aggregate_entailment(p_entail_fwd, p_entail_rev, scoring_mode)
+                nli_score = entail_signal * (1.0 - p_contra_max)
 
         # Strong one-way entailment (e.g., Siamese cat -> animal) must not be boosted
         is_directional_hypernym = (
-            max(p_entail_fwd, p_entail_rev) >= 0.70 and min(p_entail_fwd, p_entail_rev) < 0.15
+            max(p_entail_fwd, p_entail_rev) >= NLI_DIRECTIONAL_HIGH
+            and min(p_entail_fwd, p_entail_rev) < NLI_DIRECTIONAL_LOW
         )
         if not is_directional_hypernym:
-            if p_contra_max < 0.15 and fallback_score >= 0.50:
+            if p_contra_max < NLI_DIRECTIONAL_LOW and fallback_score >= 0.50:
                 lexical_entail = (1.0 - p_contra_max) * fallback_score
                 nli_score = max(nli_score, 0.50 * nli_score + 0.50 * lexical_entail)
-            elif p_contra_max < 0.25 and fallback_score >= 0.65:
+            elif p_contra_max < NLI_LEXICAL_CONTRADICT_CAP and fallback_score >= 0.65:
                 nli_score = max(nli_score, 0.70 * nli_score + 0.30 * fallback_score)
 
         return p_entail_fwd, p_entail_rev, p_contra_max, nli_score
@@ -368,6 +421,7 @@ class HuggingFaceNLIEngine:
         tier1_results: list[Tier1Result],
         escalation_judge: EscalationJudgeProtocol | None = None,
         apply_lexical_surface: bool = True,
+        scoring_mode: ScoringMode = "mean",
     ) -> list[NLIScoreDetail]:
         """
         Score a batch of sentence pairs using bidirectional NLI inference.
@@ -377,6 +431,7 @@ class HuggingFaceNLIEngine:
         then applies non-contradiction calibration.
         Falls back cleanly to Tier 1 scores if the transformer model is unavailable.
         """
+        _validate_scoring_mode(scoring_mode)
         if not pairs:
             return []
 
@@ -432,16 +487,15 @@ class HuggingFaceNLIEngine:
             pair_index_map.append((raw_idx, canon_idx))
 
         probs_all: list[list[float]] = []
-        chunk_size = 64  # 32 directional sentence pairs (64 directional inputs) per pass
         with torch.inference_mode():
-            for start in range(0, len(directional_premises), chunk_size):
-                end = start + chunk_size
+            for start in range(0, len(directional_premises), NLI_BATCH_SIZE):
+                end = start + NLI_BATCH_SIZE
                 encoded = self._tokenizer(
                     directional_premises[start:end],
                     directional_hypotheses[start:end],
                     padding=True,
                     truncation=True,
-                    max_length=256,
+                    max_length=NLI_MAX_LENGTH,
                     return_tensors="pt",
                 )
                 logits = self._model(**encoded).logits
@@ -452,14 +506,17 @@ class HuggingFaceNLIEngine:
         for (s1, s2), t1, (raw_idx, canon_idx) in zip(
             pairs, tier1_results, pair_index_map, strict=True
         ):
-            raw_metrics = self._pair_metrics(probs_all, raw_idx)
+            raw_metrics = self._pair_metrics(probs_all, raw_idx, scoring_mode=scoring_mode)
             canon_metrics = (
-                self._pair_metrics(probs_all, canon_idx) if canon_idx is not None else None
+                self._pair_metrics(probs_all, canon_idx, scoring_mode=scoring_mode)
+                if canon_idx is not None
+                else None
             )
             p_entail_fwd, p_entail_rev, p_contra_max, nli_score = self._calibrate_score(
                 raw_metrics,
                 canon_metrics,
                 t1.fallback_score,
+                scoring_mode=scoring_mode,
             )
 
             score = round(max(0.0, min(1.0, nli_score)), 4)
