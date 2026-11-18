@@ -308,7 +308,8 @@ def evaluate_uncached_pairs(
 
     resolved: list[JudgmentOutput] = []
     for out in outputs:
-        assert out is not None
+        if out is None:
+            raise RuntimeError("Missing uncached evaluation output")
         resolved.append(out)
     return resolved
 
@@ -321,7 +322,7 @@ def _compute_uncached_pairs(
     owned_results: dict[str, JudgmentOutput] = {}
     new_records: list[JudgmentRecord] = []
 
-    for (pair_hash, s1, s2), out in zip(owned_pairs, outputs):
+    for (pair_hash, s1, s2), out in zip(owned_pairs, outputs, strict=True):
         owned_results[pair_hash] = out
         new_records.append(
             JudgmentRecord(

@@ -120,7 +120,7 @@ _EN_SURFACE_SYNONYMS: list[tuple[re.Pattern[str], str]] = [
             r"(?<!\bhalf )(?<!\bnearly )(?<!\balmost )"
             r"(?<!\babout )(?<!\bover )(?<!\bunder )"
             r"(?<!\bmore than )(?<!\bless than )(?<!\bjust )(?<!\bonly )(?<!\bnot )"
-            r"\ba year ago\b",
+            r"(?<!n't )\ba year ago\b",
             re.IGNORECASE,
         ),
         "last year",
@@ -136,8 +136,6 @@ _EN_SYNONYM_MAP: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\breally like\b"), "like"),
     (re.compile(r"\badore\b"), "like"),
     (re.compile(r"\blove\b"), "like"),
-    (re.compile(r"\bfeline\b"), "cat"),
-    (re.compile(r"\bcanine\b"), "dog"),
     (re.compile(r"\bcarnivorous\b"), "carnivore"),
     (re.compile(r"\bherbivorous\b"), "herbivore"),
 ]

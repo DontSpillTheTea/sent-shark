@@ -140,7 +140,10 @@ def test_passive_vs_active_japanese_voice_not_collapsed_to_entail():
     assert res.label == "NO_ENTAIL"
 
 
-def test_temporal_a_year_ago_preserves_modifiers():
+@pytest.mark.django_db
+def test_temporal_a_year_ago_preserves_modifiers_and_no_taxonomic_rewrites():
+    from assignment.services.judge_service import judge_single
+
     assert "last year" not in canonicalize_english("half a year ago")
     assert normalize_lexical_surface("He left half a year ago.") == "He left half a year ago"
     assert canonicalize_english("He left half a year ago.") == "he left half year ago"
@@ -151,12 +154,15 @@ def test_temporal_a_year_ago_preserves_modifiers():
         "just a year ago",
         "only a year ago",
         "not a year ago",
+        "It wasn't a year ago.",
     ):
         assert "last year" not in normalize_lexical_surface(phrase)
         assert "last year" not in canonicalize_english(phrase)
     assert normalize_lexical_surface("A canine was sleeping.") == "A canine was sleeping"
     assert normalize_lexical_surface("A feline was sleeping.") == "A feline was sleeping"
-    assert canonicalize_english("A canine and a feline.") == "dog and cat"
+    assert canonicalize_english("canine teeth") == "canine teeth"
+    assert canonicalize_english("A canine and a feline.") == "canine and feline"
+    assert judge_single("A wolf is a canine.", "A wolf is a dog.").label == "NO_ENTAIL"
     assert canonicalize_english("He quit smoking a year ago.") == "he quit smoking last year"
 
 

@@ -64,7 +64,7 @@ def _compute_mode_metrics(
     misclassified_ids: list[str] = []
     diff_counts: dict[str, dict[str, int]] = {d: {"total": 0, "correct": 0} for d in DIFFICULTIES}
 
-    for item, (pred_label, prob) in zip(items, predictions):
+    for item, (pred_label, prob) in zip(items, predictions, strict=True):
         expected = item["expected_label"]
         diff = item["difficulty"]
         y_true = 1.0 if expected == "ENTAIL" else 0.0
@@ -162,7 +162,7 @@ def _run_tier2_mode(
     total_ms = (time.perf_counter() - batch_start) * 1000.0
 
     latencies_ms: list[float] = []
-    for pair, t1 in zip(pairs, neutral_t1):
+    for pair, t1 in zip(pairs, neutral_t1, strict=True):
         t0 = time.perf_counter()
         nli_engine.score_pairs_batch(
             [pair],

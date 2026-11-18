@@ -275,8 +275,10 @@ class HuggingFaceNLIEngine:
     ) -> list[NLIScoreDetail]:
         """
         Score a batch of sentence pairs using bidirectional NLI inference.
-        Evaluates both normalized surface inputs and canonicalized Tier 1 representations
-        when they differ, then applies non-contradiction calibration.
+        Evaluates both normalized surface inputs (applying safe lexical surface
+        normalization when ``apply_lexical_surface=True``, or raw ``normalize_sentence``
+        when ``False``) and canonicalized Tier 1 representations when they differ,
+        then applies non-contradiction calibration.
         Falls back cleanly to Tier 1 scores if the transformer model is unavailable.
         """
         if not pairs:
@@ -315,7 +317,7 @@ class HuggingFaceNLIEngine:
         pair_index_map: list[tuple[int, int | None]] = []
 
         surface_fn = normalize_lexical_surface if apply_lexical_surface else normalize_sentence
-        for (s1, s2), t1 in zip(pairs, tier1_results):
+        for (s1, s2), t1 in zip(pairs, tier1_results, strict=True):
             n1 = surface_fn(s1)
             n2 = surface_fn(s2)
             raw_idx = len(directional_premises) // 2
@@ -351,7 +353,9 @@ class HuggingFaceNLIEngine:
                 probs_all.extend(probs)
 
         results: list[NLIScoreDetail] = []
-        for (s1, s2), t1, (raw_idx, canon_idx) in zip(pairs, tier1_results, pair_index_map):
+        for (s1, s2), t1, (raw_idx, canon_idx) in zip(
+            pairs, tier1_results, pair_index_map, strict=True
+        ):
             raw_metrics = self._pair_metrics(probs_all, raw_idx)
             canon_metrics = (
                 self._pair_metrics(probs_all, canon_idx) if canon_idx is not None else None
