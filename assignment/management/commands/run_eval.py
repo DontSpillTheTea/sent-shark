@@ -13,7 +13,8 @@ from typing import Any
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
-from assignment.services.nli_engine import nli_engine
+from assignment.services.judge_service import evaluate_uncached_pairs
+from assignment.services.nli_engine import NoOpEscalationJudge, nli_engine
 from assignment.services.normalizer import Tier1Result, evaluate_tier1, normalize_sentence
 
 DEFAULT_GAUNTLET_PATH = (
@@ -23,15 +24,7 @@ DIFFICULTIES = ("easy", "medium", "hard", "edge")
 LANGUAGES = ("ja", "en")
 LABELS = ("ENTAIL", "NO_ENTAIL")
 
-
-class _NoOpEscalationJudge:
-    """Disable Tier 3 external LLM calls so offline benchmarks stay deterministic."""
-
-    def classify(self, sentence1: str, sentence2: str) -> tuple[str, float] | None:
-        return None
-
-
-_NOOP_ESCALATION_JUDGE = _NoOpEscalationJudge()
+_NOOP_ESCALATION_JUDGE = NoOpEscalationJudge()
 
 
 def _percentile(sorted_vals: list[float], pct: float) -> float:
@@ -184,44 +177,18 @@ def _run_tier2_mode(
 def _run_hybrid_mode(
     items: list[dict[str, Any]],
 ) -> tuple[list[tuple[str, float]], list[float], float]:
-    """Evaluate all pairs using judge_bulk's Tier 1 fast-gate + Tier 2 batch pipeline."""
-    predictions: list[tuple[str, float]] = [("NO_ENTAIL", 0.0)] * len(items)
-    unresolved: list[tuple[int, str, str, Tier1Result]] = []
+    """Evaluate all pairs using judge_service's Tier 1 fast-gate + Tier 2 batch pipeline."""
+    pairs = [(item["sentence1"], item["sentence2"]) for item in items]
 
     batch_start = time.perf_counter()
-    for idx, item in enumerate(items):
-        s1 = item["sentence1"]
-        s2 = item["sentence2"]
-        t1 = evaluate_tier1(s1, s2)
-        if t1.decisive:
-            predictions[idx] = (t1.label, float(round(t1.score, 4)))
-        else:
-            unresolved.append((idx, s1, s2, t1))
-
-    if unresolved:
-        nli_inputs = [(s1, s2) for _, s1, s2, _ in unresolved]
-        t1_list = [t1 for _, _, _, t1 in unresolved]
-        details = nli_engine.score_pairs_batch(
-            nli_inputs,
-            t1_list,
-            escalation_judge=_NOOP_ESCALATION_JUDGE,
-        )
-        for (idx, _, _, _), detail in zip(unresolved, details):
-            predictions[idx] = (detail.label, float(round(detail.score, 4)))
+    outputs = evaluate_uncached_pairs(pairs, escalation_judge=_NOOP_ESCALATION_JUDGE)
     total_ms = (time.perf_counter() - batch_start) * 1000.0
+    predictions = [(out.label, float(out.score)) for out in outputs]
 
     latencies_ms: list[float] = []
-    for item in items:
-        s1 = item["sentence1"]
-        s2 = item["sentence2"]
+    for pair in pairs:
         t0 = time.perf_counter()
-        t1 = evaluate_tier1(s1, s2)
-        if not t1.decisive:
-            nli_engine.score_pairs_batch(
-                [(s1, s2)],
-                [t1],
-                escalation_judge=_NOOP_ESCALATION_JUDGE,
-            )
+        evaluate_uncached_pairs([pair], escalation_judge=_NOOP_ESCALATION_JUDGE)
         latencies_ms.append((time.perf_counter() - t0) * 1000.0)
 
     return predictions, latencies_ms, total_ms
@@ -343,13 +310,7 @@ class Command(BaseCommand):
         threshold = float(getattr(settings, "ENTAIL_THRESHOLD", 0.50))
 
         # Pre-warm NLI cross-encoder before timing so weight loading does not skew latencies
-        if nli_engine._ensure_loaded():
-            warm_pair = ("warm up sentence", "warm up sentence")
-            nli_engine.score_pairs_batch(
-                [warm_pair],
-                [evaluate_tier1(*warm_pair)],
-                escalation_judge=_NOOP_ESCALATION_JUDGE,
-            )
+        nli_engine.warm_up()
 
         t1_preds, t1_lats, t1_total = _run_tier1_mode(items, threshold)
         t2_preds, t2_lats, t2_total = _run_tier2_mode(items)

@@ -48,6 +48,26 @@ _JP_CONTRACTIONS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"([ぁ-ん一-龥])でる(?=$|[よねなぞぜ])"), r"\1でいる"),
 ]
 
+_JP_EVENT_SYNONYMS: list[tuple[str, str]] = [
+    ("ミーティング", "会議"),
+    ("先送りになりました", "延期された"),
+    ("先送りになった", "延期された"),
+    ("先送りされました", "延期された"),
+    ("先送りされた", "延期された"),
+    ("延期になりました", "延期された"),
+    ("延期になった", "延期された"),
+    ("中止になりました", "中止された"),
+    ("中止になった", "中止された"),
+    ("足を運びました", "行った"),
+    ("足を運んだ", "行った"),
+]
+
+_JP_LEXICAL_VERBS: list[tuple[str, str]] = [
+    ("乗車した", "乗った"),
+    ("購入した", "買った"),
+    ("終了した", "終わった"),
+]
+
 _JP_SYNONYM_MAP: list[tuple[str, str]] = [
     ("大好", "好"),
     ("とても好", "好"),
@@ -64,18 +84,13 @@ _JP_SYNONYM_MAP: list[tuple[str, str]] = [
     ("が欲", "は欲"),
     ("が分か", "は分か"),
     ("ができ", "はでき"),
-    ("ミーティング", "会議"),
-    ("先送りになりました", "延期された"),
-    ("先送りになった", "延期された"),
-    ("先送りされました", "延期された"),
-    ("先送りされた", "延期された"),
-    ("足を運びました", "行った"),
-    ("足を運んだ", "行った"),
-    ("ました", "た"),
-    ("された", "した"),
-    ("乗車した", "乗った"),
-    ("購入した", "買った"),
-    ("終了した", "終わった"),
+    *_JP_EVENT_SYNONYMS,
+    ("されました", "された"),
+    ("しました", "した"),
+    ("読みました", "読んだ"),
+    ("買いました", "買った"),
+    ("行きました", "行った"),
+    *_JP_LEXICAL_VERBS,
 ]
 
 _EN_CONTRACTIONS: list[tuple[re.Pattern[str], str]] = [
@@ -97,10 +112,22 @@ _EN_CONTRACTIONS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 _EN_ARTICLES_RE = re.compile(r"\b(?:a|an|the)\b")
+_EN_SURFACE_SYNONYMS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\bgave up\b", re.IGNORECASE), "quit"),
+    (re.compile(r"\bgive up\b", re.IGNORECASE), "quit"),
+    (
+        re.compile(
+            r"(?<!\bhalf )(?<!\bnearly )(?<!\balmost )"
+            r"(?<!\babout )(?<!\bover )(?<!\bunder )\ba year ago\b",
+            re.IGNORECASE,
+        ),
+        "last year",
+    ),
+    (re.compile(r"\bfeline\b", re.IGNORECASE), "cat"),
+    (re.compile(r"\bcanine\b(?!\s+t(?:eeth|ooth)\b)", re.IGNORECASE), "dog"),
+]
 _EN_SYNONYM_MAP: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"\bgave up\b"), "quit"),
-    (re.compile(r"\bgive up\b"), "quit"),
-    (re.compile(r"\ba year ago\b"), "last year"),
+    *_EN_SURFACE_SYNONYMS,
     (re.compile(r"\bpurchased\b"), "bought"),
     (re.compile(r"\bautomobile\b"), "car"),
     (re.compile(r"\bfilm\b"), "movie"),
@@ -109,8 +136,6 @@ _EN_SYNONYM_MAP: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\breally like\b"), "like"),
     (re.compile(r"\badore\b"), "like"),
     (re.compile(r"\blove\b"), "like"),
-    (re.compile(r"\bfeline\b"), "cat"),
-    (re.compile(r"\bcanine\b"), "dog"),
     (re.compile(r"\bcarnivorous\b"), "carnivore"),
     (re.compile(r"\bherbivorous\b"), "herbivore"),
 ]
@@ -168,9 +193,11 @@ _ANTONYM_PAIRS: list[tuple[str, str]] = [
     ("agree", "disagree"),
 ]
 
-# Role inversion patterns
+# Role & voice inversion patterns
 _JP_SOV_RE = re.compile(r"^(.+?)(?:が|は)(.+?)を(.+)$")
 _EN_SVO_RE = re.compile(r"^([a-z]+)\s+([a-z]+(?:s|ed)?)\s+([a-z]+)$")
+_JP_VOICE_PASSIVE_RE = re.compile(r"^(.*?)([一-龥ァ-ヶー]+)(?:され|られ)(?:た|る|ている|ていた)$")
+_JP_VOICE_ACTIVE_RE = re.compile(r"^(.*?)([一-龥ァ-ヶー]+)(?:し(?:た|ている|ていた)|する)$")
 
 
 @dataclass(frozen=True)
@@ -189,6 +216,21 @@ def normalize_sentence(text: str) -> str:
     nfkc = unicodedata.normalize("NFKC", text)
     collapsed = _WHITESPACE_RE.sub(" ", nfkc).strip()
     return _PUNCT_EDGE_RE.sub("", collapsed).strip()
+
+
+def normalize_lexical_surface(text: str) -> str:
+    """Normalize NFKC/whitespace and apply unambiguous lexical synonyms preserving register."""
+    s = normalize_sentence(text)
+    if contains_japanese(s):
+        for src, dst in (*_JP_EVENT_SYNONYMS, *_JP_LEXICAL_VERBS):
+            s = s.replace(src, dst)
+        return s
+    for pattern, repl in _EN_SURFACE_SYNONYMS:
+        s = pattern.sub(
+            lambda m, r=repl: r.capitalize() if m.group(0)[:1].isupper() else r,
+            s,
+        )
+    return s
 
 
 def contains_japanese(text: str) -> bool:
@@ -338,6 +380,41 @@ def _has_role_inversion(s1: str, s2: str) -> bool:
     return False
 
 
+def _has_jp_voice_inversion(s1: str, s2: str) -> bool:
+    """
+    Detect transitive Japanese passive-vs-active voice flips sharing the same subject
+    (e.g., '彼が逮捕された。' vs '彼が逮捕した。'), while allowing true passive/active
+    object-promoted paraphrases and event-noun canonicalizations.
+    """
+    if not (contains_japanese(s1) and contains_japanese(s2)):
+        return False
+
+    c1 = _JP_FINAL_PARTICLES_RE.sub("", _apply_jp_synonyms(_PUNCT_ALL_RE.sub("", s1)))
+    c2 = _JP_FINAL_PARTICLES_RE.sub("", _apply_jp_synonyms(_PUNCT_ALL_RE.sub("", s2)))
+
+    for passive_cand, active_cand in ((c1, c2), (c2, c1)):
+        mp = _JP_VOICE_PASSIVE_RE.match(passive_cand)
+        ma = _JP_VOICE_ACTIVE_RE.match(active_cand)
+        if not (mp and ma):
+            continue
+        p_pref, p_stem = mp.groups()
+        a_pref, a_stem = ma.groups()
+        if p_stem != a_stem:
+            continue
+        if not p_pref and not a_pref:
+            return True
+        subj_p_type, subj_p_val = _extract_subject_class(p_pref)
+        subj_a_type, subj_a_val = _extract_subject_class(a_pref)
+        if subj_p_type != "none" and subj_p_type == subj_a_type:
+            if subj_p_type == "self":
+                return True
+            canon_p = _apply_jp_synonyms(subj_p_val) if subj_p_val is not None else None
+            canon_a = _apply_jp_synonyms(subj_a_val) if subj_a_val is not None else None
+            if canon_p == canon_a:
+                return True
+    return False
+
+
 def _char_ngram_jaccard(a: str, b: str, n: int = 2) -> float:
     if not a or not b:
         return 0.0
@@ -386,7 +463,7 @@ def evaluate_tier1(sentence1: str, sentence2: str) -> Tier1Result:
     restrictive_mismatch = bool(_JP_RESTRICTIVE_RE.search(norm1)) != bool(
         _JP_RESTRICTIVE_RE.search(norm2)
     )
-    role_inverted = _has_role_inversion(norm1, norm2)
+    role_inverted = _has_role_inversion(norm1, norm2) or _has_jp_voice_inversion(norm1, norm2)
 
     if antonym_hit or role_inverted or restrictive_mismatch:
         c1 = canonicalize_for_comparison(norm1)

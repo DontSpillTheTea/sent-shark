@@ -5,6 +5,7 @@ from assignment.services.normalizer import (
     canonicalize_japanese,
     evaluate_tier1,
     is_same_language_pair,
+    normalize_lexical_surface,
     normalize_sentence,
 )
 
@@ -94,8 +95,11 @@ def test_lexical_paraphrase_and_verb_ending_canonicalizations():
     assert canonicalize_japanese("電車に乗車しました。") == "電車に乗った"
     assert canonicalize_japanese("新しい車を購入した。") == "新しい車を買った"
     assert canonicalize_japanese("会議は終了しました。") == "会議は終わった"
-    assert canonicalize_japanese("ミーティングは先送りされた。") == "会議は延期した"
+    assert canonicalize_japanese("ミーティングは先送りされた。") == "会議は延期された"
     assert canonicalize_japanese("昨日東京へ足を運んだ。") == "昨日東京へ行った"
+    assert canonicalize_japanese("図書館で本を読みました。") == canonicalize_japanese(
+        "図書館で本を読んだ。"
+    )
 
 
 @pytest.mark.django_db
@@ -114,3 +118,85 @@ def test_directional_hypernyms_and_lexical_contradictions_remain_no_entail(sente
 
     res = judge_single(sentence1, sentence2)
     assert res.label == "NO_ENTAIL"
+
+
+@pytest.mark.django_db
+def test_passive_vs_active_japanese_voice_not_collapsed_to_entail():
+    from assignment.services.judge_service import judge_single
+
+    assert canonicalize_japanese("彼が逮捕された。") != canonicalize_japanese("彼が逮捕した。")
+    assert canonicalize_japanese("昨日東京へ行きました。") == "昨日東京へ行った"
+    assert canonicalize_japanese("会議は延期になりました。") == canonicalize_japanese(
+        "会議は延期された。"
+    )
+    assert canonicalize_japanese("イベントは中止になった。") == canonicalize_japanese(
+        "イベントは中止された。"
+    )
+
+    t1 = evaluate_tier1("彼が逮捕された。", "彼が逮捕した。")
+    assert not (t1.decisive and t1.label == "ENTAIL")
+
+    res = judge_single("彼が逮捕された。", "彼が逮捕した。")
+    assert res.label == "NO_ENTAIL"
+
+
+def test_temporal_a_year_ago_preserves_modifiers():
+    assert "last year" not in canonicalize_english("half a year ago")
+    assert normalize_lexical_surface("He left half a year ago.") == "He left half a year ago"
+    assert canonicalize_english("He left half a year ago.") == "he left half year ago"
+    assert canonicalize_english("He left nearly a year ago.") == "he left nearly year ago"
+    assert canonicalize_english("He quit smoking a year ago.") == "he quit smoking last year"
+
+
+def test_nli_calibrate_score_guards_surface_contradictions_and_fuses_penalty():
+    from assignment.services.nli_engine import HuggingFaceNLIEngine
+
+    # Surface contradiction (raw_contra >= 0.35) must block canonical synonym rescue
+    raw_metrics = (0.10, 0.12, 0.45, 0.06)
+    canon_metrics = (0.90, 0.88, 0.02, 0.87)
+    _, _, p_contra, score = HuggingFaceNLIEngine._calibrate_score(
+        raw_metrics, canon_metrics, fallback_score=0.20
+    )
+    assert p_contra == pytest.approx(0.45)
+    assert score == pytest.approx(0.275)
+    assert score < 0.50
+
+    # Fused else branch must apply (1.0 - max_contra) penalty to averaged directional entailment
+    raw_metrics_else = (0.90, 0.80, 0.05, 0.8075)
+    canon_metrics_else = (0.85, 0.85, 0.30, 0.595)
+    _, _, p_contra_else, score_else = HuggingFaceNLIEngine._calibrate_score(
+        raw_metrics_else, canon_metrics_else, fallback_score=0.50
+    )
+    assert p_contra_else == pytest.approx(0.30)
+    assert score_else == pytest.approx(0.595)
+
+    # Widened directional hypernym guard (< 0.15) must prevent lexical boosting
+    raw_hyp = (0.90, 0.12, 0.02, 0.50)
+    canon_hyp = (0.90, 0.10, 0.02, 0.49)
+    _, _, _, score_hyp = HuggingFaceNLIEngine._calibrate_score(
+        raw_hyp, canon_hyp, fallback_score=0.90
+    )
+    assert score_hyp == pytest.approx(0.4949)
+    assert score_hyp < 0.50
+
+
+@pytest.mark.django_db
+def test_evaluate_uncached_pairs_and_nli_warm_up_without_db_mutation():
+    from assignment.models import JudgmentRecord
+    from assignment.services.judge_service import evaluate_uncached_pairs
+    from assignment.services.nli_engine import NoOpEscalationJudge, nli_engine
+
+    assert JudgmentRecord.objects.count() == 0
+    assert nli_engine.warm_up() is True
+
+    outputs = evaluate_uncached_pairs(
+        [
+            ("私は猫が大好きだ。", "猫が好きです。"),
+            ("He gave up smoking last year.", "He quit smoking a year ago."),
+            ("彼が逮捕された。", "彼が逮捕した。"),
+        ],
+        escalation_judge=NoOpEscalationJudge(),
+    )
+    assert [out.label for out in outputs] == ["ENTAIL", "ENTAIL", "NO_ENTAIL"]
+    assert all(out.cached is False for out in outputs)
+    assert JudgmentRecord.objects.count() == 0

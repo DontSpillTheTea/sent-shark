@@ -16,8 +16,8 @@ from django.db import IntegrityError, connection, transaction
 from django.db.models import Avg, Count
 
 from assignment.models import JudgmentRecord, RequestAuditLog
-from assignment.services.nli_engine import nli_engine
-from assignment.services.normalizer import evaluate_tier1, normalize_sentence
+from assignment.services.nli_engine import EscalationJudgeProtocol, nli_engine
+from assignment.services.normalizer import Tier1Result, evaluate_tier1, normalize_sentence
 
 # Serialize writes when running on SQLite so 30 concurrent writer threads
 # never collide on SQLite's single-writer file lock. PostgreSQL handles
@@ -263,49 +263,72 @@ def judge_single(sentence1: str, sentence2: str) -> JudgmentOutput:
     return judge_bulk([(sentence1, sentence2)])[0]
 
 
-def _compute_uncached_pairs(
-    owned_pairs: list[tuple[str, str, str]],
-) -> tuple[dict[str, JudgmentOutput], list[JudgmentRecord]]:
-    """Run Tier 1 fast-gate + batched Tier 2/3 NLI inference for owned uncached pairs."""
-    owned_results: dict[str, JudgmentOutput] = {}
-    unresolved_for_tier2: list[tuple[str, str, str, object]] = []
+def evaluate_uncached_pairs(
+    pairs: list[tuple[str, str]],
+    escalation_judge: EscalationJudgeProtocol | None = None,
+) -> list[JudgmentOutput]:
+    """
+    Pure Tier 1 fast-gate + batched Tier 2/3 NLI evaluation without cache or DB side effects.
+    Shared by both judge_bulk (after cache/singleflight filtering) and offline evaluation.
+    """
+    if not pairs:
+        return []
 
-    for pair_hash, s1, s2 in owned_pairs:
+    outputs: list[JudgmentOutput | None] = [None] * len(pairs)
+    unresolved_for_tier2: list[tuple[int, str, str, Tier1Result]] = []
+
+    for idx, (s1, s2) in enumerate(pairs):
         t1 = evaluate_tier1(s1, s2)
         if t1.decisive:
-            owned_results[pair_hash] = JudgmentOutput(
+            outputs[idx] = JudgmentOutput(
                 label=t1.label,
                 score=round(t1.score, 4),
                 tier_used=JudgmentRecord.TIER_RULE,
                 cached=False,
             )
         else:
-            unresolved_for_tier2.append((pair_hash, s1, s2, t1))
+            unresolved_for_tier2.append((idx, s1, s2, t1))
 
     if unresolved_for_tier2:
-        nli_inputs = [(item[1], item[2]) for item in unresolved_for_tier2]
-        t1_list = [item[3] for item in unresolved_for_tier2]
-        nli_details = nli_engine.score_pairs_batch(nli_inputs, t1_list)
+        nli_inputs = [(s1, s2) for _, s1, s2, _ in unresolved_for_tier2]
+        t1_list = [t1 for _, _, _, t1 in unresolved_for_tier2]
+        nli_details = nli_engine.score_pairs_batch(
+            nli_inputs,
+            t1_list,
+            escalation_judge=escalation_judge,
+        )
 
-        for (pair_hash, _s1, _s2, _), detail in zip(unresolved_for_tier2, nli_details):
-            owned_results[pair_hash] = JudgmentOutput(
+        for (idx, _s1, _s2, _), detail in zip(unresolved_for_tier2, nli_details):
+            outputs[idx] = JudgmentOutput(
                 label=detail.label,
                 score=round(detail.score, 4),
                 tier_used=detail.tier_used,
                 cached=False,
             )
 
-    new_records = [
-        JudgmentRecord(
-            pair_hash=pair_hash,
-            sentence1=s1,
-            sentence2=s2,
-            label=owned_results[pair_hash].label,
-            score=owned_results[pair_hash].score,
-            tier_used=owned_results[pair_hash].tier_used,
+    return [out for out in outputs if out is not None]
+
+
+def _compute_uncached_pairs(
+    owned_pairs: list[tuple[str, str, str]],
+) -> tuple[dict[str, JudgmentOutput], list[JudgmentRecord]]:
+    """Run Tier 1 fast-gate + batched Tier 2/3 NLI inference for owned uncached pairs."""
+    outputs = evaluate_uncached_pairs([(s1, s2) for _, s1, s2 in owned_pairs])
+    owned_results: dict[str, JudgmentOutput] = {}
+    new_records: list[JudgmentRecord] = []
+
+    for (pair_hash, s1, s2), out in zip(owned_pairs, outputs):
+        owned_results[pair_hash] = out
+        new_records.append(
+            JudgmentRecord(
+                pair_hash=pair_hash,
+                sentence1=s1,
+                sentence2=s2,
+                label=out.label,
+                score=out.score,
+                tier_used=out.tier_used,
+            )
         )
-        for pair_hash, s1, s2 in owned_pairs
-    ]
     return owned_results, new_records
 
 

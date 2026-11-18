@@ -16,7 +16,11 @@ from typing import Protocol
 
 from django.conf import settings
 
-from assignment.services.normalizer import Tier1Result, normalize_sentence
+from assignment.services.normalizer import (
+    Tier1Result,
+    evaluate_tier1,
+    normalize_lexical_surface,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +37,13 @@ class NLIScoreDetail:
 
 class EscalationJudgeProtocol(Protocol):
     def classify(self, sentence1: str, sentence2: str) -> tuple[str, float] | None: ...
+
+
+class NoOpEscalationJudge:
+    """Disable Tier 3 external LLM calls for warm-up and deterministic offline benchmarks."""
+
+    def classify(self, sentence1: str, sentence2: str) -> tuple[str, float] | None:
+        return None
 
 
 class OpenAIEscalationJudge:
@@ -181,6 +192,18 @@ class HuggingFaceNLIEngine:
         with self._lock:
             self._load_failed = False
 
+    def warm_up(self) -> bool:
+        """Load the NLI model and run a minimal inference pass so subsequent timings are warm."""
+        if not self._ensure_loaded():
+            return False
+        warm_pair = ("warm up sentence", "warm up sentence")
+        self.score_pairs_batch(
+            [warm_pair],
+            [evaluate_tier1(*warm_pair)],
+            escalation_judge=NoOpEscalationJudge(),
+        )
+        return True
+
     def _pair_metrics(
         self, probs_all: list[list[float]], pair_idx: int
     ) -> tuple[float, float, float, float]:
@@ -219,6 +242,7 @@ class HuggingFaceNLIEngine:
                 and can_score >= 0.75
                 and min(can_fwd, can_rev) >= 0.50
                 and raw_score < 0.50
+                and raw_contra < 0.35
             ):
                 # Canonicalization resolved lexical synonyms where raw MiniLM misfired
                 p_entail_fwd, p_entail_rev, p_contra_max, nli_score = canon_metrics
@@ -226,11 +250,11 @@ class HuggingFaceNLIEngine:
                 p_entail_fwd = 0.5 * (raw_fwd + can_fwd)
                 p_entail_rev = 0.5 * (raw_rev + can_rev)
                 p_contra_max = max(raw_contra, can_contra)
-                nli_score = 0.5 * (raw_score + can_score)
+                nli_score = 0.5 * (p_entail_fwd + p_entail_rev) * (1.0 - p_contra_max)
 
         # Strong one-way entailment (e.g., Siamese cat -> animal) must not be boosted
         is_directional_hypernym = (
-            max(p_entail_fwd, p_entail_rev) >= 0.70 and min(p_entail_fwd, p_entail_rev) < 0.05
+            max(p_entail_fwd, p_entail_rev) >= 0.70 and min(p_entail_fwd, p_entail_rev) < 0.15
         )
         if not is_directional_hypernym:
             if p_contra_max < 0.15 and fallback_score >= 0.50:
@@ -289,8 +313,8 @@ class HuggingFaceNLIEngine:
         pair_index_map: list[tuple[int, int | None]] = []
 
         for (s1, s2), t1 in zip(pairs, tier1_results):
-            n1 = normalize_sentence(s1)
-            n2 = normalize_sentence(s2)
+            n1 = normalize_lexical_surface(s1)
+            n2 = normalize_lexical_surface(s2)
             raw_idx = len(directional_premises) // 2
             directional_premises.extend((n1, n2))
             directional_hypotheses.extend((n2, n1))
