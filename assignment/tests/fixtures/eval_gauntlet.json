@@ -1,0 +1,542 @@
+[
+  {
+    "id": "G01",
+    "difficulty": "easy",
+    "language": "ja",
+    "phenomenon": "register_shift",
+    "sentence1": "今日はとても暑いですね。",
+    "sentence2": "今日はとても暑い。",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G02",
+    "difficulty": "easy",
+    "language": "ja",
+    "phenomenon": "pro_drop",
+    "sentence1": "私はコーヒーが好きです。",
+    "sentence2": "コーヒーが好きだ。",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G03",
+    "difficulty": "easy",
+    "language": "ja",
+    "phenomenon": "register_shift",
+    "sentence1": "図書館で本を読みました。",
+    "sentence2": "図書館で本を読んだ。",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G04",
+    "difficulty": "easy",
+    "language": "ja",
+    "phenomenon": "pro_drop",
+    "sentence1": "僕は明日大阪へ行きます。",
+    "sentence2": "明日大阪へ行くよ。",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G05",
+    "difficulty": "easy",
+    "language": "ja",
+    "phenomenon": "register_shift",
+    "sentence1": "駅の前で友達を待っています。",
+    "sentence2": "駅の前で友達を待っている。",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G06",
+    "difficulty": "easy",
+    "language": "en",
+    "phenomenon": "colloquial_contraction",
+    "sentence1": "I'm ready to leave now.",
+    "sentence2": "I am ready to leave now.",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G07",
+    "difficulty": "easy",
+    "language": "en",
+    "phenomenon": "lexical_paraphrase",
+    "sentence1": "The movie was extremely boring.",
+    "sentence2": "The film was very dull.",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G08",
+    "difficulty": "easy",
+    "language": "en",
+    "phenomenon": "register_shift",
+    "sentence1": "She doesn't drink green tea.",
+    "sentence2": "She does not drink green tea.",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G09",
+    "difficulty": "easy",
+    "language": "ja",
+    "phenomenon": "antonym_contradiction",
+    "sentence1": "この部屋は広くて明るい。",
+    "sentence2": "この部屋は狭くて暗い。",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G10",
+    "difficulty": "easy",
+    "language": "ja",
+    "phenomenon": "negation_flip",
+    "sentence1": "私は辛い料理が得意だ。",
+    "sentence2": "私は辛い料理が得意ではない。",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G11",
+    "difficulty": "easy",
+    "language": "ja",
+    "phenomenon": "unrelated_neutral",
+    "sentence1": "新幹線は定刻通りに発車した。",
+    "sentence2": "桜の花は春に咲く。",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G12",
+    "difficulty": "easy",
+    "language": "en",
+    "phenomenon": "antonym_contradiction",
+    "sentence1": "A cat is a carnivore.",
+    "sentence2": "A cat is a vegetarian.",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G13",
+    "difficulty": "easy",
+    "language": "en",
+    "phenomenon": "negation_flip",
+    "sentence1": "He always arrives on time.",
+    "sentence2": "He never arrives on time.",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G14",
+    "difficulty": "easy",
+    "language": "en",
+    "phenomenon": "unrelated_neutral",
+    "sentence1": "The Pacific Ocean is the largest ocean on Earth.",
+    "sentence2": "Classical pianos usually have eighty-eight keys.",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G15",
+    "difficulty": "easy",
+    "language": "en",
+    "phenomenon": "antonym_contradiction",
+    "sentence1": "The soup is still hot.",
+    "sentence2": "The soup is completely cold.",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G16",
+    "difficulty": "medium",
+    "language": "ja",
+    "phenomenon": "colloquial_contraction",
+    "sentence1": "宿題をもう終わらせちゃったよ。",
+    "sentence2": "宿題をすでに終わらせてしまいました。",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G17",
+    "difficulty": "medium",
+    "language": "ja",
+    "phenomenon": "colloquial_contraction",
+    "sentence1": "外で雨が降ってるね。",
+    "sentence2": "外で雨が降っています。",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G18",
+    "difficulty": "medium",
+    "language": "ja",
+    "phenomenon": "loanword_mixed",
+    "sentence1": "来週のミーティングは延期された。",
+    "sentence2": "来週の会議は先送りになりました。",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G19",
+    "difficulty": "medium",
+    "language": "ja",
+    "phenomenon": "lexical_paraphrase",
+    "sentence1": "父は新しい車を購入した。",
+    "sentence2": "父は新しい車を買いました。",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G20",
+    "difficulty": "medium",
+    "language": "en",
+    "phenomenon": "lexical_paraphrase",
+    "sentence1": "She purchased a new bicycle yesterday.",
+    "sentence2": "She bought a new bicycle yesterday.",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G21",
+    "difficulty": "medium",
+    "language": "en",
+    "phenomenon": "temporal_shift",
+    "sentence1": "He gave up smoking last year.",
+    "sentence2": "He quit smoking a year ago.",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G22",
+    "difficulty": "medium",
+    "language": "en",
+    "phenomenon": "lexical_paraphrase",
+    "sentence1": "A canine was sleeping near the front door.",
+    "sentence2": "A dog was sleeping by the front door.",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G23",
+    "difficulty": "medium",
+    "language": "ja",
+    "phenomenon": "temporal_shift",
+    "sentence1": "会議は来週の月曜日に延期された。",
+    "sentence2": "会議は今週の金曜日に前倒しされた。",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G24",
+    "difficulty": "medium",
+    "language": "ja",
+    "phenomenon": "antonym_contradiction",
+    "sentence1": "今年の売上は昨年より増加した。",
+    "sentence2": "今年の売上は昨年より減少した。",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G25",
+    "difficulty": "medium",
+    "language": "ja",
+    "phenomenon": "unrelated_neutral",
+    "sentence1": "兄は毎朝ジョギングをしている。",
+    "sentence2": "兄は大学の図書館でアルバイトをしている。",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G26",
+    "difficulty": "medium",
+    "language": "ja",
+    "phenomenon": "negation_flip",
+    "sentence1": "この店ではクレジットカードが使えます。",
+    "sentence2": "この店ではクレジットカードが使えません。",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G27",
+    "difficulty": "medium",
+    "language": "en",
+    "phenomenon": "antonym_contradiction",
+    "sentence1": "Our team won the championship match.",
+    "sentence2": "Our team lost the championship match.",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G28",
+    "difficulty": "medium",
+    "language": "en",
+    "phenomenon": "temporal_shift",
+    "sentence1": "The train departed at nine in the morning.",
+    "sentence2": "The train arrived at nine in the evening.",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G29",
+    "difficulty": "medium",
+    "language": "en",
+    "phenomenon": "unrelated_neutral",
+    "sentence1": "Maria studies astrophysics at a university in Kyoto.",
+    "sentence2": "Maria plays cello in an amateur orchestra.",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G30",
+    "difficulty": "medium",
+    "language": "en",
+    "phenomenon": "negation_flip",
+    "sentence1": "The museum is open to visitors on Sundays.",
+    "sentence2": "The museum is closed to visitors on Sundays.",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G31",
+    "difficulty": "hard",
+    "language": "ja",
+    "phenomenon": "yakuwarigo",
+    "sentence1": "俺が仲間を守るぜ！",
+    "sentence2": "私が仲間を守ります。",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G32",
+    "difficulty": "hard",
+    "language": "ja",
+    "phenomenon": "yakuwarigo",
+    "sentence1": "わしはそんな話を知らんのじゃ。",
+    "sentence2": "私はそのような話を存じません。",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G33",
+    "difficulty": "hard",
+    "language": "ja",
+    "phenomenon": "yakuwarigo",
+    "sentence1": "あたしは絶対に諦めないわよ！",
+    "sentence2": "私は決して諦めません。",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G34",
+    "difficulty": "hard",
+    "language": "ja",
+    "phenomenon": "lexical_paraphrase",
+    "sentence1": "彼は昨日東京に行った。",
+    "sentence2": "昨日、彼は東京へ足を運んだ。",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G35",
+    "difficulty": "hard",
+    "language": "ja",
+    "phenomenon": "loanword_mixed",
+    "sentence1": "最新のAI技術が翻訳の精度を高めている。",
+    "sentence2": "新しいAIテクノロジーによって翻訳の正確さが向上している。",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G36",
+    "difficulty": "hard",
+    "language": "en",
+    "phenomenon": "lexical_paraphrase",
+    "sentence1": "Because of the storm, the outdoor concert was canceled.",
+    "sentence2": "The open-air concert was called off due to the storm.",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G37",
+    "difficulty": "hard",
+    "language": "en",
+    "phenomenon": "lexical_paraphrase",
+    "sentence1": "Despite the heavy traffic, she reached the airport ahead of schedule.",
+    "sentence2": "She arrived at the airport early even though the roads were congested.",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G38",
+    "difficulty": "hard",
+    "language": "en",
+    "phenomenon": "colloquial_contraction",
+    "sentence1": "I've never seen such a breathtaking sunrise before.",
+    "sentence2": "I have never witnessed a sunrise this stunning in my life.",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G39",
+    "difficulty": "hard",
+    "language": "ja",
+    "phenomenon": "role_inversion",
+    "sentence1": "猫が魚を食べた。",
+    "sentence2": "魚が猫を食べた。",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G40",
+    "difficulty": "hard",
+    "language": "ja",
+    "phenomenon": "directional_hypernym",
+    "sentence1": "私は柴犬を飼っている。",
+    "sentence2": "私は動物を飼っている。",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G41",
+    "difficulty": "hard",
+    "language": "ja",
+    "phenomenon": "subject_mismatch",
+    "sentence1": "田中さんは来月札幌へ転勤する。",
+    "sentence2": "佐藤さんは来月札幌へ転勤する。",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G42",
+    "difficulty": "hard",
+    "language": "en",
+    "phenomenon": "role_inversion",
+    "sentence1": "The dog chased the cat.",
+    "sentence2": "The cat chased the dog.",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G43",
+    "difficulty": "hard",
+    "language": "en",
+    "phenomenon": "directional_hypernym",
+    "sentence1": "I adopted a Siamese cat.",
+    "sentence2": "I adopted an animal.",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G44",
+    "difficulty": "hard",
+    "language": "en",
+    "phenomenon": "quantifier_mismatch",
+    "sentence1": "Every student in the class passed the physics exam.",
+    "sentence2": "Only a few students in the class passed the physics exam.",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G45",
+    "difficulty": "hard",
+    "language": "en",
+    "phenomenon": "lexical_paraphrase",
+    "sentence1": "He started practicing the violin last autumn.",
+    "sentence2": "He quit playing the violin last autumn.",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G46",
+    "difficulty": "edge",
+    "language": "ja",
+    "phenomenon": "double_negation",
+    "sentence1": "この規則を知らない人はいない。",
+    "sentence2": "全員がこの規則を知っている。",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G47",
+    "difficulty": "edge",
+    "language": "ja",
+    "phenomenon": "yakuwarigo",
+    "sentence1": "腹が減ったから先に飯を食うぜ！",
+    "sentence2": "お腹が空いたので先に食事をします。",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G48",
+    "difficulty": "edge",
+    "language": "ja",
+    "phenomenon": "loanword_mixed",
+    "sentence1": "このPCはVRゲームを快適に動かせる。",
+    "sentence2": "このパソコンではVR用のゲームをスムーズにプレイできます。",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G49",
+    "difficulty": "edge",
+    "language": "ja",
+    "phenomenon": "colloquial_contraction",
+    "sentence1": "電車に乗り遅れちゃったから、次の便で行くね。",
+    "sentence2": "電車に間に合わなかったので、次の電車で向かいます。",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G50",
+    "difficulty": "edge",
+    "language": "en",
+    "phenomenon": "double_negation",
+    "sentence1": "No student failed to submit the report.",
+    "sentence2": "Every student submitted the report.",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G51",
+    "difficulty": "edge",
+    "language": "en",
+    "phenomenon": "loanword_mixed",
+    "sentence1": "The startup open-sourced its API SDK last month.",
+    "sentence2": "Last month, the startup released its API SDK as open source.",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G52",
+    "difficulty": "edge",
+    "language": "en",
+    "phenomenon": "register_shift",
+    "sentence1": "Could you possibly turn down the volume a little bit?",
+    "sentence2": "Please lower the volume slightly.",
+    "expected_label": "ENTAIL"
+  },
+  {
+    "id": "G53",
+    "difficulty": "edge",
+    "language": "ja",
+    "phenomenon": "restrictive_particle",
+    "sentence1": "猫しか好きじゃない。",
+    "sentence2": "猫も犬も好きだ。",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G54",
+    "difficulty": "edge",
+    "language": "ja",
+    "phenomenon": "restrictive_particle",
+    "sentence1": "水しか飲めない。",
+    "sentence2": "水もお茶も飲める。",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G55",
+    "difficulty": "edge",
+    "language": "ja",
+    "phenomenon": "role_inversion",
+    "sentence1": "太郎が花子に秘密を打ち明けた。",
+    "sentence2": "花子が太郎に秘密を打ち明けた。",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G56",
+    "difficulty": "edge",
+    "language": "ja",
+    "phenomenon": "quantifier_mismatch",
+    "sentence1": "参加者の全員がアンケートに回答した。",
+    "sentence2": "参加者の半数だけがアンケートに回答した。",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G57",
+    "difficulty": "edge",
+    "language": "en",
+    "phenomenon": "quantifier_mismatch",
+    "sentence1": "Only Alice solved the bonus puzzle.",
+    "sentence2": "Both Alice and Bob solved the bonus puzzle.",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G58",
+    "difficulty": "edge",
+    "language": "en",
+    "phenomenon": "role_inversion",
+    "sentence1": "The teacher praised the student.",
+    "sentence2": "The student praised the teacher.",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G59",
+    "difficulty": "edge",
+    "language": "en",
+    "phenomenon": "temporal_shift",
+    "sentence1": "Before she moved to Tokyo, she worked in Osaka.",
+    "sentence2": "After she moved to Tokyo, she worked in Osaka.",
+    "expected_label": "NO_ENTAIL"
+  },
+  {
+    "id": "G60",
+    "difficulty": "edge",
+    "language": "en",
+    "phenomenon": "directional_hypernym",
+    "sentence1": "He bought a vintage acoustic guitar in Shibuya.",
+    "sentence2": "He bought a musical instrument in Shibuya.",
+    "expected_label": "NO_ENTAIL"
+  }
+]
