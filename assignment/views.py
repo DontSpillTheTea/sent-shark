@@ -1,6 +1,7 @@
 import logging
 import math
 import time
+import uuid
 
 from django.conf import settings
 from django.core.management import call_command
@@ -61,20 +62,43 @@ def _record_audit(
         logger.warning("Failed to write RequestAuditLog: %s", exc)
 
 
+def _resolve_request_id(request) -> str:
+    """Propagate a safe incoming X-Request-Id header or generate a UUID4 identifier."""
+    raw = request.headers.get("X-Request-Id", "")
+    if isinstance(raw, str):
+        cleaned = raw.strip()
+        if cleaned and "\n" not in cleaned and "\r" not in cleaned:
+            return cleaned[:128]
+    return str(uuid.uuid4())
+
+
 class _BaseJudgeView(APIView):
     """
-    Base APIView handling per-IP sliding-window rate limiting (5 req/s -> 429)
-    and security request audit logging for all Judge endpoints.
+    Base APIView handling per-IP sliding-window rate limiting (5 req/s -> 429),
+    standard rate-limit/request-id response headers, and audit logging.
     """
 
     authentication_classes = []
     permission_classes = []
 
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        self.headers["X-Request-Id"] = _resolve_request_id(request)
+
     def _check_rate_limit(self, request, started_at: float) -> tuple[str, Response | None]:
+        if not hasattr(self, "headers"):
+            self.headers = {}
+        request_id = self.headers.get("X-Request-Id") or _resolve_request_id(request)
+        self.headers["X-Request-Id"] = request_id
+
         client_ip = get_client_ip(request)
         rate_limiter.max_requests = int(getattr(settings, "RATE_LIMIT_REQUESTS", 5))
         rate_limiter.window_seconds = float(getattr(settings, "RATE_LIMIT_WINDOW_SECONDS", 1.0))
         decision = rate_limiter.check(client_ip)
+
+        self.headers["X-RateLimit-Limit"] = str(decision.limit)
+        self.headers["X-RateLimit-Remaining"] = str(decision.remaining)
+
         if not decision.allowed:
             _record_audit(
                 request,
@@ -87,13 +111,18 @@ class _BaseJudgeView(APIView):
             return client_ip, Response(
                 {
                     "error": (
-                        f"Rate limit exceeded: max {rate_limiter.max_requests} requests "
+                        f"Rate limit exceeded: max {decision.limit} requests "
                         f"per {rate_limiter.window_seconds:g}s per client_ip."
                     ),
                     "retry_after": round(decision.retry_after, 3),
                 },
                 status=status.HTTP_429_TOO_MANY_REQUESTS,
-                headers={"Retry-After": retry_after_header},
+                headers={
+                    "Retry-After": retry_after_header,
+                    "X-RateLimit-Limit": str(decision.limit),
+                    "X-RateLimit-Remaining": "0",
+                    "X-Request-Id": request_id,
+                },
             )
         return client_ip, None
 
