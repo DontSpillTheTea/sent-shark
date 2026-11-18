@@ -181,6 +181,66 @@ class HuggingFaceNLIEngine:
         with self._lock:
             self._load_failed = False
 
+    def _pair_metrics(
+        self, probs_all: list[list[float]], pair_idx: int
+    ) -> tuple[float, float, float, float]:
+        """Compute forward entailment, reverse entailment, max contradiction, and base score."""
+        fwd = probs_all[2 * pair_idx]
+        rev = probs_all[2 * pair_idx + 1]
+        p_entail_fwd = float(fwd[self._entail_idx])
+        p_entail_rev = float(rev[self._entail_idx])
+        p_contra_max = max(
+            float(fwd[self._contradict_idx]),
+            float(rev[self._contradict_idx]),
+        )
+        base_score = 0.5 * (p_entail_fwd + p_entail_rev) * (1.0 - p_contra_max)
+        return p_entail_fwd, p_entail_rev, p_contra_max, base_score
+
+    @staticmethod
+    def _calibrate_score(
+        raw_metrics: tuple[float, float, float, float],
+        canon_metrics: tuple[float, float, float, float] | None,
+        fallback_score: float,
+    ) -> tuple[float, float, float, float]:
+        """
+        Fuse raw and canonical NLI passes and apply non-contradiction lexical calibration.
+        Guards against boosting directional hypernym pairs (strong forward/reverse asymmetry).
+        """
+        raw_fwd, raw_rev, raw_contra, raw_score = raw_metrics
+        if canon_metrics is None:
+            p_entail_fwd, p_entail_rev, p_contra_max, nli_score = raw_metrics
+        else:
+            can_fwd, can_rev, can_contra, can_score = canon_metrics
+            if can_contra >= 0.35 and can_score < raw_score:
+                # Canonicalization exposed a contradiction masked by phrasal variants
+                p_entail_fwd, p_entail_rev, p_contra_max, nli_score = canon_metrics
+            elif (
+                can_contra < 0.15
+                and can_score >= 0.75
+                and min(can_fwd, can_rev) >= 0.50
+                and raw_score < 0.50
+            ):
+                # Canonicalization resolved lexical synonyms where raw MiniLM misfired
+                p_entail_fwd, p_entail_rev, p_contra_max, nli_score = canon_metrics
+            else:
+                p_entail_fwd = 0.5 * (raw_fwd + can_fwd)
+                p_entail_rev = 0.5 * (raw_rev + can_rev)
+                p_contra_max = max(raw_contra, can_contra)
+                nli_score = 0.5 * (raw_score + can_score)
+
+        # Strong one-way entailment (e.g., Siamese cat -> animal) must not be boosted
+        is_directional_hypernym = (
+            max(p_entail_fwd, p_entail_rev) >= 0.70 and min(p_entail_fwd, p_entail_rev) < 0.05
+        )
+        if not is_directional_hypernym:
+            if p_contra_max < 0.15 and fallback_score >= 0.50:
+                lexical_entail = (1.0 - p_contra_max) * fallback_score
+                nli_score = max(nli_score, 0.50 * nli_score + 0.50 * lexical_entail)
+            elif p_contra_max < 0.25 and fallback_score >= 0.65:
+                nli_score = max(nli_score, 0.70 * nli_score + 0.30 * fallback_score)
+
+        return p_entail_fwd, p_entail_rev, p_contra_max, nli_score
+
     def score_pairs_batch(
         self,
         pairs: list[tuple[str, str]],
@@ -189,6 +249,8 @@ class HuggingFaceNLIEngine:
     ) -> list[NLIScoreDetail]:
         """
         Score a batch of sentence pairs using bidirectional NLI inference.
+        Evaluates both normalized surface inputs and canonicalized Tier 1 representations
+        when they differ, then applies non-contradiction calibration.
         Falls back cleanly to Tier 1 scores if the transformer model is unavailable.
         """
         if not pairs:
@@ -221,19 +283,31 @@ class HuggingFaceNLIEngine:
 
         import torch
 
-        # Build 2N directional inputs: forward (s1, s2) and reverse (s2, s1)
+        # Build directional inputs for raw normalized pairs and (when distinct) canonical pairs
         directional_premises: list[str] = []
         directional_hypotheses: list[str] = []
-        for s1, s2 in pairs:
+        pair_index_map: list[tuple[int, int | None]] = []
+
+        for (s1, s2), t1 in zip(pairs, tier1_results):
             n1 = normalize_sentence(s1)
             n2 = normalize_sentence(s2)
-            directional_premises.append(n1)
-            directional_hypotheses.append(n2)
-            directional_premises.append(n2)
-            directional_hypotheses.append(n1)
+            raw_idx = len(directional_premises) // 2
+            directional_premises.extend((n1, n2))
+            directional_hypotheses.extend((n2, n1))
+
+            c1 = (t1.canonical_s1 or n1).replace("<SELF>", "私") or n1
+            c2 = (t1.canonical_s2 or n2).replace("<SELF>", "私") or n2
+            if (c1, c2) != (n1, n2):
+                canon_idx = len(directional_premises) // 2
+                directional_premises.extend((c1, c2))
+                directional_hypotheses.extend((c2, c1))
+            else:
+                canon_idx = None
+
+            pair_index_map.append((raw_idx, canon_idx))
 
         probs_all: list[list[float]] = []
-        chunk_size = 64  # 32 sentence pairs (64 directional pairs) per pass
+        chunk_size = 64  # 32 directional sentence pairs (64 directional inputs) per pass
         with torch.inference_mode():
             for start in range(0, len(directional_premises), chunk_size):
                 end = start + chunk_size
@@ -250,24 +324,16 @@ class HuggingFaceNLIEngine:
                 probs_all.extend(probs)
 
         results: list[NLIScoreDetail] = []
-        for idx, ((s1, s2), t1) in enumerate(zip(pairs, tier1_results)):
-            fwd = probs_all[2 * idx]
-            rev = probs_all[2 * idx + 1]
-
-            p_entail_fwd = float(fwd[self._entail_idx])
-            p_entail_rev = float(rev[self._entail_idx])
-            p_contra_max = max(
-                float(fwd[self._contradict_idx]),
-                float(rev[self._contradict_idx]),
+        for (s1, s2), t1, (raw_idx, canon_idx) in zip(pairs, tier1_results, pair_index_map):
+            raw_metrics = self._pair_metrics(probs_all, raw_idx)
+            canon_metrics = (
+                self._pair_metrics(probs_all, canon_idx) if canon_idx is not None else None
             )
-
-            p_entail_mean = 0.5 * (p_entail_fwd + p_entail_rev)
-            nli_score = p_entail_mean * (1.0 - p_contra_max)
-
-            # Incorporate subtle Japanese register boost when Tier 1 canonical similarity
-            # is high and NLI detects near-zero contradiction
-            if p_contra_max < 0.25 and t1.fallback_score >= 0.65:
-                nli_score = max(nli_score, 0.70 * nli_score + 0.30 * t1.fallback_score)
+            p_entail_fwd, p_entail_rev, p_contra_max, nli_score = self._calibrate_score(
+                raw_metrics,
+                canon_metrics,
+                t1.fallback_score,
+            )
 
             score = round(max(0.0, min(1.0, nli_score)), 4)
             label = "ENTAIL" if score >= threshold else "NO_ENTAIL"

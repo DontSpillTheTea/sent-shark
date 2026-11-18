@@ -64,6 +64,18 @@ _JP_SYNONYM_MAP: list[tuple[str, str]] = [
     ("が欲", "は欲"),
     ("が分か", "は分か"),
     ("ができ", "はでき"),
+    ("ミーティング", "会議"),
+    ("先送りになりました", "延期された"),
+    ("先送りになった", "延期された"),
+    ("先送りされました", "延期された"),
+    ("先送りされた", "延期された"),
+    ("足を運びました", "行った"),
+    ("足を運んだ", "行った"),
+    ("ました", "た"),
+    ("された", "した"),
+    ("乗車した", "乗った"),
+    ("購入した", "買った"),
+    ("終了した", "終わった"),
 ]
 
 _EN_CONTRACTIONS: list[tuple[re.Pattern[str], str]] = [
@@ -86,6 +98,14 @@ _EN_CONTRACTIONS: list[tuple[re.Pattern[str], str]] = [
 
 _EN_ARTICLES_RE = re.compile(r"\b(?:a|an|the)\b")
 _EN_SYNONYM_MAP: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\bgave up\b"), "quit"),
+    (re.compile(r"\bgive up\b"), "quit"),
+    (re.compile(r"\ba year ago\b"), "last year"),
+    (re.compile(r"\bpurchased\b"), "bought"),
+    (re.compile(r"\bautomobile\b"), "car"),
+    (re.compile(r"\bfilm\b"), "movie"),
+    (re.compile(r"\bdull\b"), "boring"),
+    (re.compile(r"\bextremely\b"), "very"),
     (re.compile(r"\breally like\b"), "like"),
     (re.compile(r"\badore\b"), "like"),
     (re.compile(r"\blove\b"), "like"),
@@ -219,6 +239,13 @@ def _extract_subject_class(text: str) -> tuple[str, str | None]:
     return ("none", None)
 
 
+def _apply_jp_synonyms(text: str) -> str:
+    """Apply ordered Japanese lexical, passive, and past-ending canonicalizations."""
+    for src, dst in _JP_SYNONYM_MAP:
+        text = text.replace(src, dst)
+    return text
+
+
 def canonicalize_japanese(text: str, drop_first_person: bool = False) -> str:
     s = normalize_sentence(text)
     s = _PUNCT_ALL_RE.sub("", s)
@@ -231,15 +258,16 @@ def canonicalize_japanese(text: str, drop_first_person: bool = False) -> str:
     for pattern, repl in _JP_CONTRACTIONS:
         s = pattern.sub(repl, s)
 
+    # Apply lexical synonyms before copula stripping so past-tense -んだ verbs
+    # (e.g., 足を運んだ) are canonicalized before だ$ truncation.
+    s = _apply_jp_synonyms(s)
+
     # Strip sentence-final register/politeness markers iteratively
     prev = None
     while prev != s:
         prev = s
         s = _JP_FINAL_PARTICLES_RE.sub("", s)
         s = _JP_COPULA_END_RE.sub("", s)
-
-    for src, dst in _JP_SYNONYM_MAP:
-        s = s.replace(src, dst)
 
     return s
 
@@ -380,8 +408,10 @@ def evaluate_tier1(sentence1: str, sentence2: str) -> Tier1Result:
         allow_drop_self = (subj1_type == "self" and subj2_type in ("self", "none")) or (
             subj2_type == "self" and subj1_type in ("self", "none")
         )
+        canon_subj1 = _apply_jp_synonyms(subj1_val) if subj1_val is not None else None
+        canon_subj2 = _apply_jp_synonyms(subj2_val) if subj2_val is not None else None
         subjects_conflict = (
-            subj1_type == "other" and subj2_type == "other" and subj1_val != subj2_val
+            subj1_type == "other" and subj2_type == "other" and canon_subj1 != canon_subj2
         ) or ({subj1_type, subj2_type} == {"self", "other"})
         c1 = canonicalize_japanese(norm1, drop_first_person=allow_drop_self)
         c2 = canonicalize_japanese(norm2, drop_first_person=allow_drop_self)
@@ -410,7 +440,9 @@ def evaluate_tier1(sentence1: str, sentence2: str) -> Tier1Result:
             fallback_score=0.08,
         )
 
-    if c1 == c2 and not polarity_mismatch and not subjects_conflict:
+    # Fast-path Japanese register equivalence in Tier 1; English canonical collapses
+    # (which drop articles and replace phrasal synonyms) stay non-decisive for Tier 2 verification.
+    if is_jp and c1 == c2 and not polarity_mismatch and not subjects_conflict:
         return Tier1Result(
             decisive=True,
             label="ENTAIL",

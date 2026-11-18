@@ -1,3 +1,5 @@
+import pytest
+
 from assignment.services.normalizer import (
     canonicalize_english,
     canonicalize_japanese,
@@ -67,3 +69,48 @@ def test_japanese_and_english_role_inversion_veto():
     assert res_en.decisive is True
     assert res_en.label == "NO_ENTAIL"
     assert res_en.score <= 0.10
+
+
+@pytest.mark.django_db
+def test_synonym_and_temporal_paraphrases_resolve_to_entail():
+    from assignment.services.judge_service import judge_single
+
+    en_res = judge_single("He gave up smoking last year.", "He quit smoking a year ago.")
+    assert en_res.label == "ENTAIL"
+    assert en_res.score >= 0.50
+
+    jp_res = judge_single(
+        "会議は来週の月曜日に延期された。", "ミーティングは来週月曜へ先送りになった。"
+    )
+    assert jp_res.label == "ENTAIL"
+    assert jp_res.score >= 0.50
+
+
+def test_lexical_paraphrase_and_verb_ending_canonicalizations():
+    assert canonicalize_english("She purchased an automobile.") == "she bought car"
+    assert canonicalize_english("The film was extremely dull.") == "movie was very boring"
+    assert canonicalize_english("Do not give up.") == "do not quit"
+
+    assert canonicalize_japanese("電車に乗車しました。") == "電車に乗った"
+    assert canonicalize_japanese("新しい車を購入した。") == "新しい車を買った"
+    assert canonicalize_japanese("会議は終了しました。") == "会議は終わった"
+    assert canonicalize_japanese("ミーティングは先送りされた。") == "会議は延期した"
+    assert canonicalize_japanese("昨日東京へ足を運んだ。") == "昨日東京へ行った"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("sentence1", "sentence2"),
+    [
+        ("I adopted a Siamese cat.", "I adopted an animal."),
+        ("私は柴犬を飼っている。", "私は動物を飼っている。"),
+        ("He gave up smoking last year.", "He started smoking last year."),
+        ("会議は来週の月曜日に延期された。", "会議は今週の金曜日に前倒しされた。"),
+        ("The car is red.", "The automobile is blue."),
+    ],
+)
+def test_directional_hypernyms_and_lexical_contradictions_remain_no_entail(sentence1, sentence2):
+    from assignment.services.judge_service import judge_single
+
+    res = judge_single(sentence1, sentence2)
+    assert res.label == "NO_ENTAIL"
