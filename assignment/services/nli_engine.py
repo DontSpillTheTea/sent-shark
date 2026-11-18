@@ -77,6 +77,8 @@ class NLIScoreDetail:
     forward_entail: float
     reverse_entail: float
     max_contradiction: float
+    forward_contradict: float = 0.0
+    reverse_contradict: float = 0.0
 
 
 class EscalationJudgeProtocol(Protocol):
@@ -365,8 +367,43 @@ class HuggingFaceNLIEngine:
         base_score = entail_signal * (1.0 - p_contra_max)
         return p_entail_fwd, p_entail_rev, p_contra_max, base_score
 
+    def _pair_contradictions(
+        self,
+        probs_all: list[list[float]],
+        pair_idx: int,
+    ) -> tuple[float, float]:
+        """Extract directional (forward, reverse) contradiction probabilities for a pair."""
+        fwd = probs_all[2 * pair_idx]
+        rev = probs_all[2 * pair_idx + 1]
+        return float(fwd[self._contradict_idx]), float(rev[self._contradict_idx])
+
     @staticmethod
+    def _select_calibration_branch(
+        raw_metrics: tuple[float, float, float, float],
+        canon_metrics: tuple[float, float, float, float] | None,
+    ) -> str:
+        """Select calibration branch ('raw', 'canon', or 'fused') from raw/canonical metrics."""
+        if canon_metrics is None:
+            return "raw"
+        _, _, raw_contra, raw_score = raw_metrics
+        can_fwd, can_rev, can_contra, can_score = canon_metrics
+        if can_contra >= NLI_CONTRADICT_CAP and can_score < raw_score:
+            # Canonicalization exposed a contradiction masked by phrasal variants
+            return "canon"
+        if (
+            can_contra < NLI_DIRECTIONAL_LOW
+            and can_score >= 0.75
+            and min(can_fwd, can_rev) >= 0.50
+            and raw_score < 0.50
+            and raw_contra < NLI_CONTRADICT_CAP
+        ):
+            # Canonicalization resolved lexical synonyms where raw MiniLM misfired
+            return "canon"
+        return "fused"
+
+    @classmethod
     def _calibrate_score(
+        cls,
         raw_metrics: tuple[float, float, float, float],
         canon_metrics: tuple[float, float, float, float] | None,
         fallback_score: float,
@@ -377,29 +414,19 @@ class HuggingFaceNLIEngine:
         Guards against boosting directional hypernym pairs (strong forward/reverse asymmetry).
         """
         _validate_scoring_mode(scoring_mode)
-        raw_fwd, raw_rev, raw_contra, raw_score = raw_metrics
-        if canon_metrics is None:
+        branch = cls._select_calibration_branch(raw_metrics, canon_metrics)
+        if branch == "raw" or canon_metrics is None:
             p_entail_fwd, p_entail_rev, p_contra_max, nli_score = raw_metrics
+        elif branch == "canon":
+            p_entail_fwd, p_entail_rev, p_contra_max, nli_score = canon_metrics
         else:
-            can_fwd, can_rev, can_contra, can_score = canon_metrics
-            if can_contra >= NLI_CONTRADICT_CAP and can_score < raw_score:
-                # Canonicalization exposed a contradiction masked by phrasal variants
-                p_entail_fwd, p_entail_rev, p_contra_max, nli_score = canon_metrics
-            elif (
-                can_contra < NLI_DIRECTIONAL_LOW
-                and can_score >= 0.75
-                and min(can_fwd, can_rev) >= 0.50
-                and raw_score < 0.50
-                and raw_contra < NLI_CONTRADICT_CAP
-            ):
-                # Canonicalization resolved lexical synonyms where raw MiniLM misfired
-                p_entail_fwd, p_entail_rev, p_contra_max, nli_score = canon_metrics
-            else:
-                p_entail_fwd = 0.5 * (raw_fwd + can_fwd)
-                p_entail_rev = 0.5 * (raw_rev + can_rev)
-                p_contra_max = max(raw_contra, can_contra)
-                entail_signal = _aggregate_entailment(p_entail_fwd, p_entail_rev, scoring_mode)
-                nli_score = entail_signal * (1.0 - p_contra_max)
+            raw_fwd, raw_rev, raw_contra, _ = raw_metrics
+            can_fwd, can_rev, can_contra, _ = canon_metrics
+            p_entail_fwd = 0.5 * (raw_fwd + can_fwd)
+            p_entail_rev = 0.5 * (raw_rev + can_rev)
+            p_contra_max = max(raw_contra, can_contra)
+            entail_signal = _aggregate_entailment(p_entail_fwd, p_entail_rev, scoring_mode)
+            nli_score = entail_signal * (1.0 - p_contra_max)
 
         # Strong one-way entailment (e.g., Siamese cat -> animal) must not be boosted
         is_directional_hypernym = (
@@ -456,6 +483,8 @@ class HuggingFaceNLIEngine:
                     forward_entail=t1.fallback_score,
                     reverse_entail=t1.fallback_score,
                     max_contradiction=round(1.0 - t1.fallback_score, 4),
+                    forward_contradict=round(1.0 - t1.fallback_score, 4),
+                    reverse_contradict=round(1.0 - t1.fallback_score, 4),
                 )
                 for t1 in tier1_results
             ]
@@ -518,6 +547,17 @@ class HuggingFaceNLIEngine:
                 t1.fallback_score,
                 scoring_mode=scoring_mode,
             )
+            raw_contra_fwd, raw_contra_rev = self._pair_contradictions(probs_all, raw_idx)
+            if canon_idx is None:
+                p_contra_fwd, p_contra_rev = raw_contra_fwd, raw_contra_rev
+            else:
+                can_contra_fwd, can_contra_rev = self._pair_contradictions(probs_all, canon_idx)
+                branch = self._select_calibration_branch(raw_metrics, canon_metrics)
+                if branch == "canon":
+                    p_contra_fwd, p_contra_rev = can_contra_fwd, can_contra_rev
+                else:
+                    p_contra_fwd = max(raw_contra_fwd, can_contra_fwd)
+                    p_contra_rev = max(raw_contra_rev, can_contra_rev)
 
             score = round(max(0.0, min(1.0, nli_score)), 4)
             label: EntailmentLabel = "ENTAIL" if score >= threshold else "NO_ENTAIL"
@@ -539,6 +579,8 @@ class HuggingFaceNLIEngine:
                     forward_entail=round(p_entail_fwd, 4),
                     reverse_entail=round(p_entail_rev, 4),
                     max_contradiction=round(p_contra_max, 4),
+                    forward_contradict=round(p_contra_fwd, 4),
+                    reverse_contradict=round(p_contra_rev, 4),
                 )
             )
         return results

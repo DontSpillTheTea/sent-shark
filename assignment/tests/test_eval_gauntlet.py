@@ -484,3 +484,309 @@ def test_run_eval_supports_scoring_modes_and_provenance_metadata():
     assert "holdout" in md
     assert "jglue_jnli" in md
     assert "paws_x" in md
+
+
+def test_wilson_confidence_interval_and_diagnostics_schema(tmp_path):
+    from assignment.management.commands.run_eval import (
+        DEFAULT_FINAL_HOLDOUT_PATH,
+        _classify_error_category,
+        _load_and_validate_fixture,
+        _resolve_fixture,
+        _wilson_ci_95,
+    )
+
+    lo, hi = _wilson_ci_95(correct=36, total=60)
+    assert 0.46 <= lo <= 0.48
+    assert 0.71 <= hi <= 0.73
+    assert _wilson_ci_95(0, 0) == [0.0, 0.0]
+
+    lo_full, hi_full = _wilson_ci_95(correct=60, total=60)
+    assert 0.0 <= lo_full <= hi_full <= 1.0
+    assert hi_full == 1.0
+
+    lo_zero, hi_zero = _wilson_ci_95(correct=0, total=60)
+    assert 0.0 <= lo_zero <= hi_zero <= 1.0
+    assert lo_zero == 0.0
+
+    assert (
+        _classify_error_category({"stratum": "adversarial_swap"}) == "word_order_or_particle_swap"
+    )
+    assert _classify_error_category({"stratum": "oneway_entail"}) == "oneway_specificity"
+    assert _classify_error_category({"stratum": "contradict"}) == "negation_or_antonym"
+    assert (
+        _classify_error_category({"source": "jglue_jnli", "stratum": "bidir_entail"})
+        == "caption_codescription"
+    )
+    assert _classify_error_category({"phenomenon": "lexical_paraphrase"}) == "lexical_synonym_gap"
+    assert _classify_error_category({"phenomenon": "temporal_shift"}) == "other"
+
+    ds_name, ds_path = _resolve_fixture("final_holdout", None)
+    assert ds_name == "final_holdout"
+    assert ds_path == DEFAULT_FINAL_HOLDOUT_PATH
+
+    bad_fixture = tmp_path / "bad_source_id.json"
+    bad_fixture.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "B1",
+                    "language": "en",
+                    "source_id": True,
+                    "sentence1": "A cat sleeps.",
+                    "sentence2": "A cat naps.",
+                    "expected_label": "ENTAIL",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(CommandError, match="source_id"):
+        _load_and_validate_fixture(bad_fixture)
+
+
+@pytest.mark.django_db
+def test_run_eval_supports_ablation_and_misclassification_diagnostics(tmp_path, monkeypatch):
+    from assignment.management.commands import run_eval as run_eval_cmd
+    from assignment.services import nli_engine as nli_mod
+
+    fixture = tmp_path / "mini_eval.json"
+    fixture.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "D1",
+                    "language": "en",
+                    "stratum": "paraphrase",
+                    "source": "mini",
+                    "source_id": "1",
+                    "sentence1": "A cat sleeps.",
+                    "sentence2": "A cat sleeps.",
+                    "expected_label": "ENTAIL",
+                },
+                {
+                    "id": "D2",
+                    "language": "en",
+                    "stratum": "adversarial_swap",
+                    "source": "mini",
+                    "source_id": 2,
+                    "sentence1": "The dog chased the cat.",
+                    "sentence2": "The cat chased the dog.",
+                    "expected_label": "NO_ENTAIL",
+                },
+                {
+                    "id": "D3_EXACT_MISMATCH",
+                    "language": "en",
+                    "stratum": "paraphrase",
+                    "source": "mini",
+                    "source_id": "3",
+                    "sentence1": "A dog barks.",
+                    "sentence2": "A dog barks.",
+                    "expected_label": "NO_ENTAIL",
+                },
+                {
+                    "id": "D4_RULE_MISMATCH",
+                    "language": "en",
+                    "stratum": "contradict",
+                    "source": "mini",
+                    "source_id": "4",
+                    "sentence1": "The soup is still hot.",
+                    "sentence2": "The soup is completely cold.",
+                    "expected_label": "ENTAIL",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    # 1. Test full_hybrid with --diagnostics (captures tier1_exact and tier1_rule short-circuits)
+    out_full = StringIO()
+    call_command(
+        "run_eval",
+        "--fixture",
+        str(fixture),
+        "--ablation",
+        "full_hybrid",
+        "--diagnostics",
+        "--json",
+        stdout=out_full,
+    )
+    rep_full = json.loads(out_full.getvalue())
+    assert rep_full["provenance"]["ablation"] == "full_hybrid"
+    hy_full = rep_full["modes"]["hybrid"]
+    assert "accuracy_ci95" in hy_full
+    assert len(hy_full["accuracy_ci95"]) == 2
+    assert 0.0 <= hy_full["accuracy_ci95"][0] <= hy_full["accuracy_ci95"][1] <= 1.0
+    for breakdown_key in ("by_language", "by_source", "by_stratum"):
+        for bucket in hy_full[breakdown_key].values():
+            assert "accuracy_ci95" in bucket
+            assert len(bucket["accuracy_ci95"]) == 2
+
+    full_by_id = {m["id"]: m for m in hy_full["misclassifications"]}
+    assert "D3_EXACT_MISMATCH" in full_by_id
+    assert full_by_id["D3_EXACT_MISMATCH"]["origin_tier"] == "tier1_exact"
+    assert full_by_id["D3_EXACT_MISMATCH"]["tier1_reason"] == "exact_normalized_match"
+    assert full_by_id["D3_EXACT_MISMATCH"]["directional_nli"] is None
+    assert "D4_RULE_MISMATCH" in full_by_id
+    assert full_by_id["D4_RULE_MISMATCH"]["origin_tier"] == "tier1_rule"
+    assert full_by_id["D4_RULE_MISMATCH"]["tier1_reason"] == "contradiction_veto"
+    assert full_by_id["D4_RULE_MISMATCH"]["directional_nli"] is None
+    assert full_by_id["D4_RULE_MISMATCH"]["error_category"] == "negation_or_antonym"
+
+    # 2. Test exact_plus_nli with --diagnostics (bypasses Tier 1 rules -> D2 fails via tier2_nli)
+    out_exact = StringIO()
+    call_command(
+        "run_eval",
+        "--fixture",
+        str(fixture),
+        "--ablation",
+        "exact_plus_nli",
+        "--diagnostics",
+        "--json",
+        stdout=out_exact,
+    )
+    rep_exact = json.loads(out_exact.getvalue())
+    assert rep_exact["provenance"]["ablation"] == "exact_plus_nli"
+    hy_exact = rep_exact["modes"]["hybrid"]
+    assert "accuracy_ci95" in hy_exact and len(hy_exact["accuracy_ci95"]) == 2
+    exact_by_id = {m["id"]: m for m in hy_exact["misclassifications"]}
+    assert "D3_EXACT_MISMATCH" in exact_by_id
+    assert exact_by_id["D3_EXACT_MISMATCH"]["origin_tier"] == "tier1_exact"
+    assert exact_by_id["D3_EXACT_MISMATCH"]["directional_nli"] is None
+    assert "D2" in exact_by_id
+    d2_err = exact_by_id["D2"]
+    for key in (
+        "id",
+        "source",
+        "source_id",
+        "language",
+        "stratum",
+        "sentence1",
+        "sentence2",
+        "expected_label",
+        "predicted_label",
+        "score",
+        "origin_tier",
+        "tier1_reason",
+        "directional_nli",
+        "error_category",
+    ):
+        assert key in d2_err
+    assert d2_err["source_id"] == 2
+    assert d2_err["origin_tier"] == "tier2_nli"
+    assert d2_err["tier1_reason"] == "non_identical"
+    assert d2_err["error_category"] == "word_order_or_particle_swap"
+    dnli = d2_err["directional_nli"]
+    assert isinstance(dnli, dict)
+    assert set(dnli.keys()) == {"p_entail_fwd", "p_entail_rev", "p_contra_fwd", "p_contra_rev"}
+    for val in dnli.values():
+        assert isinstance(val, float) and 0.0 <= val <= 1.0
+
+    # 3. Test nli_only with --diagnostics (even exact matches route to tier2_nli)
+    out_nli = StringIO()
+    call_command(
+        "run_eval",
+        "--fixture",
+        str(fixture),
+        "--ablation",
+        "nli_only",
+        "--diagnostics",
+        "--json",
+        stdout=out_nli,
+    )
+    rep_nli = json.loads(out_nli.getvalue())
+    assert rep_nli["provenance"]["ablation"] == "nli_only"
+    hy_nli = rep_nli["modes"]["hybrid"]
+    nli_by_id = {m["id"]: m for m in hy_nli["misclassifications"]}
+    assert "D3_EXACT_MISMATCH" in nli_by_id
+    assert nli_by_id["D3_EXACT_MISMATCH"]["origin_tier"] == "tier2_nli"
+    assert nli_by_id["D3_EXACT_MISMATCH"]["tier1_reason"] == "tier2_only"
+    assert isinstance(nli_by_id["D3_EXACT_MISMATCH"]["directional_nli"], dict)
+    assert "D2" in nli_by_id
+    assert nli_by_id["D2"]["origin_tier"] == "tier2_nli"
+
+    # 4. Test --dataset dev_diagnostic works cleanly with --diagnostics
+    out_dd = StringIO()
+    call_command(
+        "run_eval",
+        "--dataset",
+        "dev_diagnostic",
+        "--ablation",
+        "exact_plus_nli",
+        "--diagnostics",
+        "--json",
+        stdout=out_dd,
+    )
+    rep_dd = json.loads(out_dd.getvalue())
+    assert rep_dd["provenance"]["dataset_name"] == "dev_diagnostic"
+    assert rep_dd["provenance"]["fixture_path"].endswith("eval_holdout.json")
+    assert rep_dd["provenance"]["ablation"] == "exact_plus_nli"
+    assert rep_dd["dataset"]["total_pairs"] == 60
+    for mode_name in ("tier1", "tier2", "hybrid"):
+        mode = rep_dd["modes"][mode_name]
+        cm = mode["confusion_matrix"]
+        assert len(mode["misclassifications"]) == cm["fp"] + cm["fn"]
+
+    # 5. Test --model-name scopes local engine; warm_up failure raises CommandError
+    singleton_before = nli_mod.nli_engine.model_name
+
+    class FakeScopedEngine:
+        def __init__(self, model_name=None):
+            self.model_name = model_name
+            self.warmed = False
+
+        def warm_up(self):
+            self.warmed = True
+            return True
+
+        def get_model_revision(self):
+            return "fake-rev-123"
+
+        def score_pairs_batch(
+            self,
+            pairs,
+            tier1_results,
+            escalation_judge=None,
+            apply_lexical_surface=True,
+            scoring_mode="mean",
+        ):
+            return [
+                nli_mod.NLIScoreDetail(
+                    score=0.95,
+                    label="ENTAIL",
+                    tier_used="tier2_nli",
+                    forward_entail=0.96,
+                    reverse_entail=0.94,
+                    max_contradiction=0.01,
+                    forward_contradict=0.01,
+                    reverse_contradict=0.005,
+                )
+                for _ in pairs
+            ]
+
+    monkeypatch.setattr(run_eval_cmd, "HuggingFaceNLIEngine", FakeScopedEngine)
+    out_scoped = StringIO()
+    call_command(
+        "run_eval",
+        "--fixture",
+        str(fixture),
+        "--model-name",
+        "fake/scoped-nli",
+        "--ablation",
+        "nli_only",
+        "--diagnostics",
+        "--json",
+        stdout=out_scoped,
+    )
+    rep_scoped = json.loads(out_scoped.getvalue())
+    assert rep_scoped["provenance"]["model_name"] == "fake/scoped-nli"
+    assert rep_scoped["provenance"]["model_revision"] == "fake-rev-123"
+    assert rep_scoped["model"]["name"] == "fake/scoped-nli"
+    assert nli_mod.nli_engine.model_name == singleton_before
+
+    class FailingEngine(FakeScopedEngine):
+        def warm_up(self):
+            return False
+
+    monkeypatch.setattr(run_eval_cmd, "HuggingFaceNLIEngine", FailingEngine)
+    with pytest.raises(CommandError, match="warm up"):
+        call_command("run_eval", "--fixture", str(fixture), "--model-name", "fake/broken-nli")
