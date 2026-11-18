@@ -4,15 +4,34 @@ info:
   version: 0.1.0
   description: >
     Determines whether two same-language sentences convey the same meaning (entailment)
-    using a 3-Tier Hybrid NLI Pipeline (Deterministic Linguistic Gate + Bidirectional
-    HuggingFace NLI Cross-Encoder + Optional Cloud LLM Escalation).
+    using a 3-Tier Hybrid NLI Pipeline (Tier 1 Deterministic Linguistic Gate + Tier 2
+    Bidirectional HuggingFace NLI Cross-Encoder + Optional Tier 3 Cloud LLM Escalation).
+    All `/judge*` endpoints are also mounted under `/api/v1/judge*` (with or without trailing
+    slashes) and enforce a 5 req/s per-`client_ip` sliding-window rate limit.
 servers:
   - url: http://localhost:8000
-    description: Local Django / Docker server
+    description: Local Django / Docker Compose server
 paths:
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Service health check
+      responses:
+        "200":
+          description: Service is healthy (not rate-limited)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: "ok"
+
   /judge:
     post:
+      operationId: judgeSingle
       summary: Judge entailment for a single same-language sentence pair (F1)
+      parameters:
+        - $ref: "#/components/parameters/XRequestIdHeader"
       requestBody:
         required: true
         content:
@@ -25,6 +44,13 @@ paths:
       responses:
         "200":
           description: Entailment classification and confidence score
+          headers:
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
           content:
             application/json:
               schema:
@@ -33,16 +59,16 @@ paths:
                 label: "ENTAIL"
                 score: 0.92
         "400":
-          description: Validation error (empty text, length exceeded, or mismatched languages)
+          $ref: "#/components/responses/ValidationError"
         "429":
-          description: Rate limit exceeded (max 5 requests/second per client_ip)
-          headers:
-            Retry-After:
-              schema:
-                type: string
+          $ref: "#/components/responses/RateLimitExceeded"
+
   /judge/bulk:
     post:
-      summary: Batch entailment judgment for up to 100 sentence pairs (F2)
+      operationId: judgeBulk
+      summary: Batch entailment judgment for 1 to 100 sentence pairs (F2)
+      parameters:
+        - $ref: "#/components/parameters/XRequestIdHeader"
       requestBody:
         required: true
         content:
@@ -55,74 +81,277 @@ paths:
                   items:
                     $ref: "#/components/schemas/JudgeRequest"
                 - $ref: "#/components/schemas/BulkJudgeRequest"
+            examples:
+              arrayPayload:
+                summary: Raw JSON array of pairs
+                value:
+                  - sentence1: "私は猫が大好きだ。"
+                    sentence2: "猫が好きです。"
+                  - sentence1: "A cat is a carnivore."
+                    sentence2: "A cat is a vegetarian."
+              wrapperPayload:
+                summary: Object with pairs array
+                value:
+                  pairs:
+                    - sentence1: "私は猫が大好きだ。"
+                      sentence2: "猫が好きです。"
       responses:
         "200":
-          description: Ordered list of entailment judgments
+          description: Ordered list of entailment judgments matching input order
+          headers:
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
           content:
             application/json:
               schema:
                 type: array
                 items:
                   $ref: "#/components/schemas/JudgeResponse"
+              example:
+                - label: "ENTAIL"
+                  score: 0.92
+                - label: "NO_ENTAIL"
+                  score: 0.06
         "400":
-          description: Invalid payload or batch size outside 1..100
+          $ref: "#/components/responses/BulkValidationError"
         "429":
-          description: Rate limit exceeded (5 req/s per client_ip)
+          $ref: "#/components/responses/RateLimitExceeded"
+
   /judge/stats:
     get:
-      summary: Aggregate judgment statistics, tier distribution, and audit metrics (F3)
+      operationId: judgeStats
+      summary: Aggregate judgment metrics, tier distribution, and audit metrics (F3)
+      parameters:
+        - $ref: "#/components/parameters/XRequestIdHeader"
       responses:
         "200":
-          description: Summary metrics and stored accuracy statistics
+          description: Summary metrics and stored ground-truth accuracy statistics
+          headers:
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/StatsResponse"
         "429":
-          description: Rate limit exceeded
+          $ref: "#/components/responses/RateLimitExceeded"
+
   /judge/evaluate:
     post:
-      summary: Evaluate model predictions against ground-truth labels and calculate accuracy/F1 (F3)
+      operationId: judgeEvaluate
+      summary: Evaluate predictions against ground-truth labels and compute accuracy/F1 (F3)
+      parameters:
+        - $ref: "#/components/parameters/XRequestIdHeader"
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              type: object
-              required: [pairs]
-              properties:
-                pairs:
-                  type: array
-                  minItems: 1
-                  maxItems: 100
-                  items:
-                    allOf:
-                      - $ref: "#/components/schemas/JudgeRequest"
-                      - type: object
-                        required: [expected_label]
-                        properties:
-                          expected_label:
-                            type: string
-                            enum: [ENTAIL, NO_ENTAIL]
+              $ref: "#/components/schemas/EvaluateRequest"
+            example:
+              pairs:
+                - sentence1: "私は猫が大好きだ。"
+                  sentence2: "猫が好きです。"
+                  expected_label: "ENTAIL"
+                - sentence1: "猫が魚を食べた。"
+                  sentence2: "魚が猫を食べた。"
+                  expected_label: "NO_ENTAIL"
       responses:
         "200":
-          description: Evaluation metrics (accuracy, precision, recall, f1, confusion matrix)
+          description: Evaluation metrics (accuracy, precision, recall, F1, confusion matrix, per-pair results)
+          headers:
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/EvaluateResponse"
         "400":
-          description: Validation error
+          $ref: "#/components/responses/ValidationError"
         "429":
-          description: Rate limit exceeded
-  /health:
-    get:
-      summary: Service health check
+          $ref: "#/components/responses/RateLimitExceeded"
+
+  /api/v1/judge:
+    post:
+      operationId: apiV1JudgeSingle
+      summary: Versioned alias for POST /judge
+      parameters:
+        - $ref: "#/components/parameters/XRequestIdHeader"
+      requestBody:
+        $ref: "#/paths/~1judge/post/requestBody"
       responses:
         "200":
-          description: Service is healthy
+          $ref: "#/paths/~1judge/post/responses/200"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+
+  /api/v1/judge/bulk:
+    post:
+      operationId: apiV1JudgeBulk
+      summary: Versioned alias for POST /judge/bulk
+      parameters:
+        - $ref: "#/components/parameters/XRequestIdHeader"
+      requestBody:
+        $ref: "#/paths/~1judge~1bulk/post/requestBody"
+      responses:
+        "200":
+          $ref: "#/paths/~1judge~1bulk/post/responses/200"
+        "400":
+          $ref: "#/components/responses/BulkValidationError"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+
+  /api/v1/judge/stats:
+    get:
+      operationId: apiV1JudgeStats
+      summary: Versioned alias for GET /judge/stats
+      parameters:
+        - $ref: "#/components/parameters/XRequestIdHeader"
+      responses:
+        "200":
+          $ref: "#/paths/~1judge~1stats/get/responses/200"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+
+  /api/v1/judge/evaluate:
+    post:
+      operationId: apiV1JudgeEvaluate
+      summary: Versioned alias for POST /judge/evaluate
+      parameters:
+        - $ref: "#/components/parameters/XRequestIdHeader"
+      requestBody:
+        $ref: "#/paths/~1judge~1evaluate/post/requestBody"
+      responses:
+        "200":
+          $ref: "#/paths/~1judge~1evaluate/post/responses/200"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "429":
+          $ref: "#/components/responses/RateLimitExceeded"
+
 components:
+  parameters:
+    XRequestIdHeader:
+      name: X-Request-Id
+      in: header
+      required: false
+      description: Optional correlation ID echoed back in the response (truncated to 128 chars; UUID4 generated if omitted or invalid).
+      schema:
+        type: string
+        maxLength: 128
+
+  headers:
+    X-RateLimit-Limit:
+      description: Configured maximum requests allowed per sliding window per client_ip (default 5).
+      schema:
+        type: string
+        example: "5"
+    X-RateLimit-Remaining:
+      description: Remaining requests permitted in the current 1.0s sliding window for client_ip.
+      schema:
+        type: string
+        example: "4"
+    X-Request-Id:
+      description: Request correlation ID (propagated from request header or generated UUID4).
+      schema:
+        type: string
+        example: "550e8400-e29b-41d4-a716-446655440000"
+    Retry-After:
+      description: Whole seconds to wait before retrying (ceiling of retry_after, minimum 1).
+      schema:
+        type: string
+        example: "1"
+
+  responses:
+    ValidationError:
+      description: Validation error (blank text, max_length=2000 exceeded, invalid expected_label, or cross-language pair).
+      headers:
+        X-RateLimit-Limit:
+          $ref: "#/components/headers/X-RateLimit-Limit"
+        X-RateLimit-Remaining:
+          $ref: "#/components/headers/X-RateLimit-Remaining"
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ValidationErrorObject"
+          example:
+            non_field_errors:
+              - "sentence1 and sentence2 must be written in the same language."
+    BulkValidationError:
+      description: Invalid payload, batch size outside 1..100, or item validation error.
+      headers:
+        X-RateLimit-Limit:
+          $ref: "#/components/headers/X-RateLimit-Limit"
+        X-RateLimit-Remaining:
+          $ref: "#/components/headers/X-RateLimit-Remaining"
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: "#/components/schemas/ErrorMessage"
+              - $ref: "#/components/schemas/ValidationErrorObject"
+              - type: array
+                items:
+                  $ref: "#/components/schemas/ValidationErrorObject"
+          examples:
+            invalidBatchSize:
+              summary: Empty or >100 raw list
+              value:
+                error: "Bulk request must contain between 1 and 100 sentence pairs."
+            itemErrors:
+              summary: Per-item validation errors for raw list
+              value:
+                - non_field_errors:
+                    - "sentence1 and sentence2 must be written in the same language."
+                - {}
+    RateLimitExceeded:
+      description: Rate limit exceeded (max 5 requests per 1s per client_ip).
+      headers:
+        Retry-After:
+          $ref: "#/components/headers/Retry-After"
+        X-RateLimit-Limit:
+          $ref: "#/components/headers/X-RateLimit-Limit"
+        X-RateLimit-Remaining:
+          description: Always "0" when rate limited.
+          schema:
+            type: string
+            example: "0"
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RateLimitError"
+          example:
+            error: "Rate limit exceeded: max 5 requests per 1s per client_ip."
+            retry_after: 0.842
+
   schemas:
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          example: "ok"
     JudgeRequest:
       type: object
       required: [sentence1, sentence2]
@@ -131,10 +360,12 @@ components:
           type: string
           minLength: 1
           maxLength: 2000
+          description: First sentence (whitespace-trimmed, non-blank, same language family as sentence2).
         sentence2:
           type: string
           minLength: 1
           maxLength: 2000
+          description: Second sentence (whitespace-trimmed, non-blank, same language family as sentence1).
     BulkJudgeRequest:
       type: object
       required: [pairs]
@@ -145,6 +376,25 @@ components:
           maxItems: 100
           items:
             $ref: "#/components/schemas/JudgeRequest"
+    LabeledJudgePair:
+      allOf:
+        - $ref: "#/components/schemas/JudgeRequest"
+        - type: object
+          required: [expected_label]
+          properties:
+            expected_label:
+              type: string
+              enum: [ENTAIL, NO_ENTAIL]
+    EvaluateRequest:
+      type: object
+      required: [pairs]
+      properties:
+        pairs:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/LabeledJudgePair"
     JudgeResponse:
       type: object
       required: [label, score]
@@ -159,11 +409,20 @@ components:
           maximum: 1.0
     StatsResponse:
       type: object
+      required:
+        - total_judgments
+        - label_distribution
+        - tier_distribution
+        - average_score
+        - stored_ground_truth_count
+        - stored_accuracy
+        - audit
       properties:
         total_judgments:
           type: integer
         label_distribution:
           type: object
+          required: [ENTAIL, NO_ENTAIL]
           properties:
             ENTAIL:
               type: integer
@@ -183,6 +442,7 @@ components:
           nullable: true
         audit:
           type: object
+          required: [total_requests, rate_limited_requests, average_latency_ms]
           properties:
             total_requests:
               type: integer
@@ -191,8 +451,46 @@ components:
             average_latency_ms:
               type: number
               nullable: true
+    EvaluateResultItem:
+      type: object
+      required:
+        - sentence1
+        - sentence2
+        - expected_label
+        - predicted_label
+        - score
+        - correct
+        - tier_used
+      properties:
+        sentence1:
+          type: string
+        sentence2:
+          type: string
+        expected_label:
+          type: string
+          enum: [ENTAIL, NO_ENTAIL]
+        predicted_label:
+          type: string
+          enum: [ENTAIL, NO_ENTAIL]
+        score:
+          type: number
+          format: float
+        correct:
+          type: boolean
+        tier_used:
+          type: string
+          enum: [tier1_rule, tier2_nli, tier3_llm]
     EvaluateResponse:
       type: object
+      required:
+        - total
+        - correct
+        - accuracy
+        - precision
+        - recall
+        - f1
+        - confusion_matrix
+        - results
       properties:
         total:
           type: integer
@@ -208,6 +506,7 @@ components:
           type: number
         confusion_matrix:
           type: object
+          required: [tp, fp, tn, fn]
           properties:
             tp:
               type: integer
@@ -220,4 +519,25 @@ components:
         results:
           type: array
           items:
-            type: object
+            $ref: "#/components/schemas/EvaluateResultItem"
+    ErrorMessage:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+    RateLimitError:
+      type: object
+      required: [error, retry_after]
+      properties:
+        error:
+          type: string
+        retry_after:
+          type: number
+          format: float
+    ValidationErrorObject:
+      type: object
+      additionalProperties:
+        type: array
+        items:
+          type: string
