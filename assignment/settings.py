@@ -124,6 +124,7 @@ NLI_ENABLE_MODEL = os.environ.get("NLI_ENABLE_MODEL", "true").lower() == "true"
 NLI_ENTAIL_INDEX = _optional_int_env("NLI_ENTAIL_INDEX")
 NLI_CONTRADICT_INDEX = _optional_int_env("NLI_CONTRADICT_INDEX")
 ENTAIL_THRESHOLD = float(os.environ.get("ENTAIL_THRESHOLD", "0.50"))
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(os.environ.get("DATA_UPLOAD_MAX_MEMORY_SIZE", str(2621440)))
 
 RATE_LIMIT_REQUESTS = int(os.environ.get("RATE_LIMIT_REQUESTS", "5"))
 RATE_LIMIT_WINDOW_SECONDS = float(os.environ.get("RATE_LIMIT_WINDOW_SECONDS", "1.0"))

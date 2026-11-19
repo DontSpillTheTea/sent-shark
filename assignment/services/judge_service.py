@@ -17,7 +17,7 @@ from django.db import connection, transaction
 
 from assignment.models import JudgmentRecord
 from assignment.services import nli_engine as nli_mod
-from assignment.services.nli_engine import nli_engine
+from assignment.services.nli_engine import NLI_MAX_LENGTH, TokenLimitExceededError, nli_engine
 from assignment.services.normalizer import Tier1Result, evaluate_tier1, normalize_sentence
 from assignment.types import EntailmentLabel, TierName
 
@@ -399,34 +399,49 @@ def _compute_uncached_pairs(
     return owned_results, new_records
 
 
+def validate_pairs_token_limits(pairs: list[tuple[str, str]]) -> None:
+    """
+    Validate that all normalized sentence pairs fit within NLI_MAX_LENGTH combined
+    tokens across both directions when NLI_ENABLE_MODEL is enabled.
+    When NLI_ENABLE_MODEL is False, skip tokenization and rely on character bounds.
+    """
+    if not pairs or not getattr(settings, "NLI_ENABLE_MODEL", True):
+        return
+    max_tokens = nli_engine.max_pair_tokens_batch(pairs)
+    if max_tokens > NLI_MAX_LENGTH:
+        if len(pairs) == 1:
+            raise TokenLimitExceededError(
+                f"Sentence pair exceeds maximum NLI sequence length of "
+                f"{NLI_MAX_LENGTH} tokens (got {max_tokens} tokens)."
+            )
+        raise TokenLimitExceededError(
+            f"Batch contains a sentence pair exceeding maximum NLI sequence length of "
+            f"{NLI_MAX_LENGTH} tokens (max {max_tokens} tokens)."
+        )
+
+
 def judge_bulk(pairs: list[tuple[str, str]]) -> list[JudgmentOutput]:
     """
     Judge a batch of up to 100 sentence pairs with:
-    1. In-batch deduplication by canonical order-independent SHA-256 pair_hash
-    2. Bounded in-memory LRU hot cache + single-query DB cache lookup
-    3. Per-hash singleflight coalescing across concurrent cold-cache requests
-    4. Tier 1 exact-match gate + single batched HuggingFace NLI inference pass
-    5. Concurrency-safe atomic DB persistence
+    1. Upfront 256-token bound validation across all pairs (zero partial writes)
+    2. In-batch deduplication by canonical order-independent SHA-256 pair_hash
+    3. Bounded in-memory LRU hot cache + single-query DB cache lookup
+    4. Per-hash singleflight coalescing across concurrent cold-cache requests
+    5. Tier 1 exact-match gate + single batched HuggingFace NLI inference pass
+    6. Concurrency-safe atomic DB persistence
     """
     if not pairs:
         return []
 
+    validate_pairs_token_limits(pairs)
     cache_cfg = _resolve_cache_config()
     hashed_items: list[tuple[str, str, str]] = []
     pair_by_hash: dict[str, tuple[str, str]] = {}
 
     for s1, s2 in pairs:
-        pair_hash, _, _ = compute_pair_hash(
-            s1,
-            s2,
-            model_name=cache_cfg.model_name,
-            policy_version=cache_cfg.policy_version,
-            entail_threshold=cache_cfg.threshold_value,
-            model_revision=cache_cfg.model_revision,
-            model_enabled=cache_cfg.model_enabled,
-            entail_index=cache_cfg.entail_index,
-            contradict_index=cache_cfg.contradict_index,
-        )
+        norm1 = normalize_sentence(s1)
+        norm2 = normalize_sentence(s2)
+        pair_hash = _hash_normalized_pair(norm1, norm2, cache_cfg)
         hashed_items.append((pair_hash, s1, s2))
         if pair_hash not in pair_by_hash:
             pair_by_hash[pair_hash] = (s1, s2)

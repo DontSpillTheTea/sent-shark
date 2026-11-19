@@ -4,6 +4,7 @@ import time
 import uuid
 
 from django.conf import settings
+from django.core.exceptions import RequestDataTooBig
 from django.core.management import call_command
 from django.shortcuts import render
 from django.views.decorators.http import require_GET
@@ -23,6 +24,7 @@ from assignment.services.judge_service import (
     judge_single,
     run_sqlite_write,
 )
+from assignment.services.nli_engine import TokenLimitExceededError
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +138,31 @@ class _BaseJudgeView(APIView):
             )
         return response
 
+    def handle_exception(self, exc):
+        if isinstance(exc, RequestDataTooBig):
+            return Response(
+                {"error": "Request body exceeds maximum allowed size (2.5 MiB)."},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+        return super().handle_exception(exc)
+
+    def _bad_request_response(
+        self,
+        request,
+        client_ip: str,
+        started_at: float,
+        data,
+        payload_chars: int = 0,
+    ) -> Response:
+        _record_audit(
+            request,
+            client_ip=client_ip,
+            status_code=status.HTTP_400_BAD_REQUEST,
+            started_at=started_at,
+            payload_chars=payload_chars,
+        )
+        return Response(data, status=status.HTTP_400_BAD_REQUEST)
+
     def _check_rate_limit(self, request, started_at: float) -> tuple[str, Response | None]:
         if not hasattr(self, "headers"):
             self.headers = {}
@@ -189,17 +216,25 @@ class JudgeSingleView(_BaseJudgeView):
 
         serializer = JudgePairSerializer(data=request.data)
         if not serializer.is_valid():
-            _record_audit(
+            return self._bad_request_response(
                 request,
                 client_ip=client_ip,
-                status_code=status.HTTP_400_BAD_REQUEST,
                 started_at=started,
+                data=serializer.errors,
             )
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         s1 = serializer.validated_data["sentence1"]
         s2 = serializer.validated_data["sentence2"]
-        result = judge_single(s1, s2)
+        try:
+            result = judge_single(s1, s2)
+        except TokenLimitExceededError as exc:
+            return self._bad_request_response(
+                request,
+                client_ip=client_ip,
+                started_at=started,
+                data={"error": str(exc)},
+                payload_chars=len(s1) + len(s2),
+            )
 
         _record_audit(
             request,
@@ -226,41 +261,44 @@ class JudgeBulkView(_BaseJudgeView):
         raw_data = request.data
         if isinstance(raw_data, list):
             if not raw_data or len(raw_data) > 100:
-                _record_audit(
+                return self._bad_request_response(
                     request,
                     client_ip=client_ip,
-                    status_code=status.HTTP_400_BAD_REQUEST,
                     started_at=started,
-                )
-                return Response(
-                    {"error": "Bulk request must contain between 1 and 100 sentence pairs."},
-                    status=status.HTTP_400_BAD_REQUEST,
+                    data={"error": "Bulk request must contain between 1 and 100 sentence pairs."},
                 )
             item_serializer = JudgePairSerializer(data=raw_data, many=True)
             if not item_serializer.is_valid():
-                _record_audit(
+                return self._bad_request_response(
                     request,
                     client_ip=client_ip,
-                    status_code=status.HTTP_400_BAD_REQUEST,
                     started_at=started,
+                    data=item_serializer.errors,
                 )
-                return Response(item_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
             validated_pairs = item_serializer.validated_data
         else:
             wrapper_serializer = BulkJudgeWrapperSerializer(data=raw_data)
             if not wrapper_serializer.is_valid():
-                _record_audit(
+                return self._bad_request_response(
                     request,
                     client_ip=client_ip,
-                    status_code=status.HTTP_400_BAD_REQUEST,
                     started_at=started,
+                    data=wrapper_serializer.errors,
                 )
-                return Response(wrapper_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
             validated_pairs = wrapper_serializer.validated_data["pairs"]
 
         pairs = [(item["sentence1"], item["sentence2"]) for item in validated_pairs]
-        outputs = judge_bulk(pairs)
         total_chars = sum(len(s1) + len(s2) for s1, s2 in pairs)
+        try:
+            outputs = judge_bulk(pairs)
+        except TokenLimitExceededError as exc:
+            return self._bad_request_response(
+                request,
+                client_ip=client_ip,
+                started_at=started,
+                data={"error": str(exc)},
+                payload_chars=total_chars,
+            )
 
         _record_audit(
             request,

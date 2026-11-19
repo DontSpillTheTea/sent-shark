@@ -388,6 +388,96 @@ class TestRateLimit:
         assert r_not_acc.status_code == status.HTTP_406_NOT_ACCEPTABLE
         assert r_not_acc.headers["X-Request-Id"] == "valid-req-406"
 
+    def test_oversized_request_body_returns_json_413_with_headers_and_audit(self, settings):
+        assert settings.DATA_UPLOAD_MAX_MEMORY_SIZE == 2621440
+
+        # 1. Real > 2.5 MiB body against default DATA_UPLOAD_MAX_MEMORY_SIZE
+        over_2_5mib = b'{"sentence1": "' + (b"a" * 2_630_000) + b'", "sentence2": "cat"}'
+        r_real = self.client.post(
+            "/judge",
+            data=over_2_5mib,
+            content_type="application/json",
+            REMOTE_ADDR="192.0.2.170",
+            HTTP_X_REQUEST_ID="req-413-real",
+        )
+        assert r_real.status_code == status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+        assert "application/json" in r_real.headers["Content-Type"]
+        assert r_real.json() == {"error": "Request body exceeds maximum allowed size (2.5 MiB)."}
+        assert r_real.headers["X-Request-Id"] == "req-413-real"
+        assert r_real.headers["X-RateLimit-Limit"] == "5"
+        assert r_real.headers["X-RateLimit-Remaining"] == "4"
+
+        # 2. Low threshold override on both /judge and /judge/bulk
+        settings.DATA_UPLOAD_MAX_MEMORY_SIZE = 1024
+        over_1kb = b'{"pairs": [{"sentence1": "' + (b"b" * 1200) + b'", "sentence2": "dog"}]}'
+        r_bulk_413 = self.client.post(
+            "/judge/bulk",
+            data=over_1kb,
+            content_type="application/json",
+            REMOTE_ADDR="192.0.2.171",
+            HTTP_X_REQUEST_ID="req-413-bulk",
+        )
+        assert r_bulk_413.status_code == status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+        assert "application/json" in r_bulk_413.headers["Content-Type"]
+        assert r_bulk_413.json() == {
+            "error": "Request body exceeds maximum allowed size (2.5 MiB)."
+        }
+        assert r_bulk_413.headers["X-Request-Id"] == "req-413-bulk"
+        assert r_bulk_413.headers["X-RateLimit-Limit"] == "5"
+        assert r_bulk_413.headers["X-RateLimit-Remaining"] == "4"
+
+        assert (
+            RequestAuditLog.objects.filter(
+                client_ip="192.0.2.170", path="/judge", status_code=413, rate_limited=False
+            ).count()
+            == 1
+        )
+        assert (
+            RequestAuditLog.objects.filter(
+                client_ip="192.0.2.171", path="/judge/bulk", status_code=413, rate_limited=False
+            ).count()
+            == 1
+        )
+
+    def test_token_limit_and_strict_type_400_include_headers_and_audit(self, monkeypatch):
+        from assignment.services import judge_service
+        from assignment.services.nli_engine import TokenLimitExceededError
+
+        r_type = self.client.post(
+            "/judge",
+            {"sentence1": 123, "sentence2": "456"},
+            format="json",
+            REMOTE_ADDR="192.0.2.180",
+            HTTP_X_REQUEST_ID="req-400-type",
+        )
+        assert r_type.status_code == status.HTTP_400_BAD_REQUEST
+        assert r_type.headers["X-Request-Id"] == "req-400-type"
+        assert r_type.headers["X-RateLimit-Limit"] == "5"
+        assert r_type.headers["X-RateLimit-Remaining"] == "4"
+
+        def raise_token_limit(_pairs):
+            raise TokenLimitExceededError("Sentence pair exceeds maximum NLI sequence length.")
+
+        monkeypatch.setattr(judge_service, "validate_pairs_token_limits", raise_token_limit)
+        r_tok = self.client.post(
+            "/judge",
+            {"sentence1": "alpha", "sentence2": "beta"},
+            format="json",
+            REMOTE_ADDR="192.0.2.180",
+            HTTP_X_REQUEST_ID="req-400-tok",
+        )
+        assert r_tok.status_code == status.HTTP_400_BAD_REQUEST
+        assert r_tok.json() == {"error": "Sentence pair exceeds maximum NLI sequence length."}
+        assert r_tok.headers["X-Request-Id"] == "req-400-tok"
+        assert r_tok.headers["X-RateLimit-Limit"] == "5"
+        assert r_tok.headers["X-RateLimit-Remaining"] == "3"
+        assert (
+            RequestAuditLog.objects.filter(
+                client_ip="192.0.2.180", status_code=400, rate_limited=False
+            ).count()
+            == 2
+        )
+
 
 def test_rate_limiter_evicts_oldest_ip_keys_when_capacity_exceeded():
     from assignment.rate_limit import SlidingWindowRateLimiter

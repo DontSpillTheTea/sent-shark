@@ -332,3 +332,239 @@ def test_unknown_nli_id2label_raises_explicit_value_error(monkeypatch, settings)
     assert res[0].label == "ENTAIL"
     assert res[0].forward_entail > 0.90
     assert override_engine.model_revision == "deadbeef1234"
+
+
+@pytest.mark.django_db
+class TestInputValidationAndTokenLimits:
+    def setup_method(self):
+        self.client = APIClient()
+        rate_limiter.reset()
+
+    def teardown_method(self):
+        rate_limiter.reset()
+
+    @staticmethod
+    def _mock_nli(monkeypatch):
+        from assignment.services import nli_engine as nli_mod
+
+        monkeypatch.setattr(
+            nli_mod.nli_engine,
+            "score_pairs_batch",
+            lambda pairs, tier1_results=None: [
+                nli_mod.NLIScoreDetail(
+                    score=0.92,
+                    label="ENTAIL",
+                    tier_used="tier2_nli",
+                    forward_entail=0.93,
+                    reverse_entail=0.91,
+                    max_contradiction=0.02,
+                    forward_contradict=0.02,
+                    reverse_contradict=0.01,
+                )
+                for _ in pairs
+            ],
+        )
+
+    @pytest.mark.parametrize(
+        ("s1", "s2"),
+        [
+            (123, "456"),
+            ("456", 123),
+            (12.5, "12.5"),
+            (True, False),
+            (["a"], "a"),
+            ({}, "a"),
+        ],
+    )
+    def test_rejects_non_string_json_types_on_single_and_bulk(self, s1, s2):
+        r_single = self.client.post(
+            "/judge",
+            {"sentence1": s1, "sentence2": s2},
+            format="json",
+            REMOTE_ADDR="198.51.100.41",
+        )
+        assert r_single.status_code == status.HTTP_400_BAD_REQUEST
+
+        r_bulk_wrapped = self.client.post(
+            "/judge/bulk",
+            {"pairs": [{"sentence1": s1, "sentence2": s2}]},
+            format="json",
+            REMOTE_ADDR="198.51.100.42",
+        )
+        assert r_bulk_wrapped.status_code == status.HTTP_400_BAD_REQUEST
+
+        r_bulk_list = self.client.post(
+            "/judge/bulk",
+            [{"sentence1": s1, "sentence2": s2}],
+            format="json",
+            REMOTE_ADDR="198.51.100.43",
+        )
+        assert r_bulk_list.status_code == status.HTTP_400_BAD_REQUEST
+        assert JudgmentRecord.objects.count() == 0
+        assert RequestAuditLog.objects.filter(status_code=400).count() == 3
+
+    def test_accepts_numeric_strings_while_rejecting_numeric_json_primitives(self):
+        resp_str = self.client.post(
+            "/judge",
+            {"sentence1": "123", "sentence2": "123"},
+            format="json",
+            REMOTE_ADDR="198.51.100.40",
+        )
+        assert resp_str.status_code == status.HTTP_200_OK
+        assert resp_str.json() == {"label": "ENTAIL", "score": 0.99}
+
+    @pytest.mark.parametrize(
+        ("s1", "s2"),
+        [
+            ("", "猫が好きです。"),
+            ("   ", "猫が好きです。"),
+            ("\u3000\u3000", "猫が好きです。"),
+            ("\u200b", "\u200b"),
+            ("\ufeff", "猫が好きです。"),
+            ("\u200c\u200d", "\u200b"),
+            ("...", "!!!"),
+            ("。。。", "！？"),
+            ("\u200b。。。", "\ufeff"),
+            ("hello\x00world", "hello world"),
+        ],
+    )
+    def test_rejects_empty_invisible_punctuation_only_and_nul_strings(self, s1, s2):
+        resp = self.client.post(
+            "/judge",
+            {"sentence1": s1, "sentence2": s2},
+            format="json",
+            REMOTE_ADDR="198.51.100.44",
+        )
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert JudgmentRecord.objects.count() == 0
+        assert RequestAuditLog.objects.filter(status_code=400).count() == 1
+
+    def test_preserves_internal_unicode_zwj_in_meaningful_text(self, monkeypatch):
+        from assignment.services.normalizer import normalize_sentence
+
+        self._mock_nli(monkeypatch)
+        s1 = "👨‍👩‍👧が笑う"
+        s2 = "👨‍👩‍👧が微笑む"
+        assert "\u200d" in normalize_sentence(s1)
+
+        resp = self.client.post(
+            "/judge",
+            {"sentence1": s1, "sentence2": s2},
+            format="json",
+            REMOTE_ADDR="198.51.100.45",
+        )
+        assert resp.status_code == status.HTTP_200_OK
+        rec = JudgmentRecord.objects.get()
+        assert "\u200d" in rec.sentence1
+        assert "\u200d" in rec.sentence2
+
+    def test_token_limit_256_passes_and_257_rejected_atomically_across_single_and_bulk(
+        self, monkeypatch, settings
+    ):
+        from assignment.services import nli_engine as nli_mod
+        from assignment.services.nli_engine import NLI_MAX_LENGTH, nli_engine
+
+        settings.NLI_ENABLE_MODEL = True
+        tok = nli_engine.ensure_tokenizer()
+        assert tok is not None
+
+        short = "cat"
+        words = ["cat"] * 240
+        while True:
+            candidate = " ".join(words)
+            tok_count = max(
+                len(tok([candidate], [short], padding=False, truncation=False)["input_ids"][0]),
+                len(tok([short], [candidate], padding=False, truncation=False)["input_ids"][0]),
+            )
+            if tok_count == NLI_MAX_LENGTH:
+                break
+            assert tok_count < NLI_MAX_LENGTH
+            words.append("cat")
+        boundary_256 = " ".join(words)
+        overflow_257 = " ".join([*words, "cat"])
+        assert len(overflow_257) <= 2000
+
+        # Exact 256-token pair succeeds (200)
+        self._mock_nli(monkeypatch)
+        ok_resp = self.client.post(
+            "/judge",
+            {"sentence1": boundary_256, "sentence2": short},
+            format="json",
+            REMOTE_ADDR="198.51.100.46",
+        )
+        assert ok_resp.status_code == status.HTTP_200_OK
+        assert JudgmentRecord.objects.count() == 1
+        JudgmentRecord.objects.all().delete()
+
+        # Any 257-token overflow (forward or reverse) must fail with 400 before NLI or DB writes
+        def fail_if_nli_called(*_args, **_kwargs):
+            raise AssertionError("score_pairs_batch must not run when token limit is exceeded")
+
+        monkeypatch.setattr(nli_mod.nli_engine, "score_pairs_batch", fail_if_nli_called)
+
+        for s1, s2 in ((overflow_257, short), (short, overflow_257)):
+            bad_resp = self.client.post(
+                "/judge",
+                {"sentence1": s1, "sentence2": s2},
+                format="json",
+                REMOTE_ADDR="198.51.100.47",
+            )
+            assert bad_resp.status_code == status.HTTP_400_BAD_REQUEST
+            assert "error" in bad_resp.json()
+            assert JudgmentRecord.objects.count() == 0
+
+        # Bulk atomicity: 1 valid pair (+ Tier-1 exact match) + 1 257-token pair -> 0 writes
+        bulk_resp = self.client.post(
+            "/judge/bulk",
+            {
+                "pairs": [
+                    {"sentence1": "猫が好きです。", "sentence2": "猫が好きです。"},
+                    {"sentence1": "私は猫が大好きだ。", "sentence2": "猫が好きです。"},
+                    {"sentence1": short, "sentence2": overflow_257},
+                ]
+            },
+            format="json",
+            REMOTE_ADDR="198.51.100.48",
+        )
+        assert bulk_resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert "error" in bulk_resp.json()
+        assert JudgmentRecord.objects.count() == 0
+        assert RequestAuditLog.objects.filter(status_code=400).count() == 3
+
+    def test_offline_disabled_model_allows_2000_char_input_without_tokenizer_files(
+        self, monkeypatch, settings
+    ):
+        import transformers
+
+        from assignment.services.nli_engine import nli_engine
+
+        settings.NLI_ENABLE_MODEL = False
+        monkeypatch.setattr(nli_engine, "_tokenizer", None)
+        monkeypatch.setattr(nli_engine, "_tokenizer_model_name", None)
+
+        def fail_if_tokenizer_loaded(*_args, **_kwargs):
+            raise RuntimeError(
+                "HF tokenizer files must not be required when NLI_ENABLE_MODEL=False"
+            )
+
+        monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", fail_if_tokenizer_loaded)
+
+        long_s1 = ("cat " * 400).strip()  # 1599 chars <= 2000, > 256 tokens
+        long_s2 = ("dog " * 400).strip()
+        resp = self.client.post(
+            "/judge",
+            {"sentence1": long_s1, "sentence2": long_s2},
+            format="json",
+            REMOTE_ADDR="198.51.100.49",
+        )
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json() == {"label": "NO_ENTAIL", "score": 0.0}
+
+        too_long = "a" * 2001
+        resp_over_char = self.client.post(
+            "/judge",
+            {"sentence1": too_long, "sentence2": "dog"},
+            format="json",
+            REMOTE_ADDR="198.51.100.49",
+        )
+        assert resp_over_char.status_code == status.HTTP_400_BAD_REQUEST

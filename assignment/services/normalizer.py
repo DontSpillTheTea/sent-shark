@@ -38,6 +38,18 @@ def normalize_sentence(text: str) -> str:
     return _PUNCT_EDGE_RE.sub("", collapsed).strip()
 
 
+def has_substantive_content(text: str) -> bool:
+    """
+    Return True when normalized text contains at least one letter, number, or symbol
+    (rejecting empty, whitespace-, punctuation-, or invisible-only inputs without
+    mutating legitimate internal Unicode formatting characters such as emoji ZWJ).
+    """
+    if not isinstance(text, str):
+        return False
+    norm = normalize_sentence(text)
+    return bool(norm) and any(unicodedata.category(ch)[0] in ("L", "N", "S") for ch in norm)
+
+
 def contains_japanese(text: str) -> bool:
     """Return True if text contains Japanese Kana or CJK characters."""
     return bool(_KANA_RE.search(text) or _CJK_RE.search(text))

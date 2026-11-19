@@ -29,6 +29,34 @@ class TokenLimitExceededError(ValueError):
     """Raised when a directional premise-hypothesis sequence exceeds NLI_MAX_LENGTH tokens."""
 
 
+def _deduplicate_directional_pairs(
+    pairs: list[tuple[str, str]],
+) -> tuple[list[tuple[str, str]], list[tuple[int, int]]]:
+    """Normalize pairs and return deduplicated directional (p, h) sequences plus pair indices."""
+    unique_dir_pairs: list[tuple[str, str]] = []
+    dir_index_by_pair: dict[tuple[str, str], int] = {}
+    pair_dir_indices: list[tuple[int, int]] = []
+
+    for s1, s2 in pairs:
+        n1 = normalize_sentence(s1)
+        n2 = normalize_sentence(s2)
+        fwd_key = (n1, n2)
+        rev_key = (n2, n1)
+        fwd_idx = dir_index_by_pair.get(fwd_key)
+        if fwd_idx is None:
+            fwd_idx = len(unique_dir_pairs)
+            dir_index_by_pair[fwd_key] = fwd_idx
+            unique_dir_pairs.append(fwd_key)
+        rev_idx = dir_index_by_pair.get(rev_key)
+        if rev_idx is None:
+            rev_idx = len(unique_dir_pairs)
+            dir_index_by_pair[rev_key] = rev_idx
+            unique_dir_pairs.append(rev_key)
+        pair_dir_indices.append((fwd_idx, rev_idx))
+
+    return unique_dir_pairs, pair_dir_indices
+
+
 def _resolve_hf_model_revision(model_name: str, model_config=None) -> str | None:
     """Resolve model commit revision from Transformers config or local HF cache snapshot."""
     commit_hash = getattr(model_config, "_commit_hash", None) if model_config is not None else None
@@ -192,6 +220,90 @@ class HuggingFaceNLIEngine:
             f"id2label={id2label!r}",
         )
 
+    def _load_tokenizer(self):
+        from transformers import AutoTokenizer
+
+        try:
+            return AutoTokenizer.from_pretrained(self.model_name, local_files_only=True)
+        except Exception:
+            return AutoTokenizer.from_pretrained(self.model_name)
+
+    def ensure_tokenizer(self):
+        """
+        Return the cached HuggingFace tokenizer for self.model_name, loading once under lock.
+        Returns None when NLI_ENABLE_MODEL is False or if tokenizer loading fails.
+        """
+        if not getattr(settings, "NLI_ENABLE_MODEL", True):
+            return None
+        if self._tokenizer is not None and self._tokenizer_model_name == self.model_name:
+            return self._tokenizer
+        if self._load_failed:
+            return None
+
+        with self._lock:
+            if not getattr(settings, "NLI_ENABLE_MODEL", True):
+                return None
+            if self._tokenizer is not None and self._tokenizer_model_name == self.model_name:
+                return self._tokenizer
+            if self._load_failed:
+                return None
+
+            try:
+                tokenizer = self._load_tokenizer()
+                self._tokenizer = tokenizer
+                self._tokenizer_model_name = self.model_name
+                return tokenizer
+            except Exception as exc:
+                logger.warning(
+                    "Unable to load NLI tokenizer '%s'; token-limit precheck unavailable: %s",
+                    self.model_name,
+                    exc,
+                )
+                self._load_failed = True
+                return None
+
+    @staticmethod
+    def _max_sequence_length(encoded) -> int:
+        input_ids = encoded["input_ids"]
+        if hasattr(input_ids, "shape"):
+            return int(input_ids.shape[1]) if len(input_ids.shape) >= 2 else len(input_ids)
+        if not input_ids:
+            return 0
+        if isinstance(input_ids[0], (list, tuple)):
+            return max(len(seq) for seq in input_ids)
+        return len(input_ids)
+
+    def max_pair_tokens_batch(self, pairs: list[tuple[str, str]]) -> int:
+        """
+        Return the maximum combined sequence token count across both directions of all
+        normalized pairs without truncation, or 0 when disabled/unavailable.
+        """
+        if not pairs or not getattr(settings, "NLI_ENABLE_MODEL", True):
+            return 0
+        tokenizer = self.ensure_tokenizer()
+        if tokenizer is None:
+            return 0
+
+        unique_dir_pairs, _ = _deduplicate_directional_pairs(pairs)
+        max_len = 0
+        for start in range(0, len(unique_dir_pairs), NLI_BATCH_SIZE):
+            chunk = unique_dir_pairs[start : start + NLI_BATCH_SIZE]
+            encoded = tokenizer(
+                [p for p, _ in chunk],
+                [h for _, h in chunk],
+                padding=False,
+                truncation=False,
+            )
+            max_len = max(max_len, self._max_sequence_length(encoded))
+        return max_len
+
+    def count_pair_tokens(self, s1: str, s2: str) -> int:
+        """
+        Return the maximum combined sequence token count across (s1 -> s2) and (s2 -> s1)
+        without truncation, or 0 when NLI_ENABLE_MODEL is False or unavailable.
+        """
+        return self.max_pair_tokens_batch([(s1, s2)])
+
     def _ensure_loaded(self) -> bool:
         if not getattr(settings, "NLI_ENABLE_MODEL", True):
             return False
@@ -208,10 +320,7 @@ class HuggingFaceNLIEngine:
 
             try:
                 import torch
-                from transformers import (
-                    AutoModelForSequenceClassification,
-                    AutoTokenizer,
-                )
+                from transformers import AutoModelForSequenceClassification
 
                 # Guard against multi-thread CPU oversubscription during parallel bursts
                 torch.set_num_threads(max(1, min(4, os.cpu_count() or 2)))
@@ -223,7 +332,7 @@ class HuggingFaceNLIEngine:
                 ):
                     tokenizer = self._tokenizer
                 else:
-                    tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+                    tokenizer = self._load_tokenizer()
                 model = AutoModelForSequenceClassification.from_pretrained(self.model_name)
                 model.eval()
 
@@ -232,10 +341,10 @@ class HuggingFaceNLIEngine:
 
                 self._tokenizer = tokenizer
                 self._tokenizer_model_name = self.model_name
-                self._model = model
                 self._entail_idx = entail_idx
                 self._contradict_idx = contradict_idx
                 self.model_revision = model_revision
+                self._model = model
                 return True
             except ValueError:
                 raise
@@ -291,42 +400,25 @@ class HuggingFaceNLIEngine:
                 fallback_label: EntailmentLabel = (
                     "ENTAIL" if raw_fallback >= threshold else "NO_ENTAIL"
                 )
+                rounded_fallback = round(raw_fallback, 4)
+                rounded_contra = round(1.0 - raw_fallback, 4)
                 fallback_details.append(
                     NLIScoreDetail(
-                        score=round(raw_fallback, 4),
+                        score=rounded_fallback,
                         label=fallback_label,
                         tier_used="tier1_rule",
-                        forward_entail=raw_fallback,
-                        reverse_entail=raw_fallback,
-                        max_contradiction=round(1.0 - raw_fallback, 4),
-                        forward_contradict=round(1.0 - raw_fallback, 4),
-                        reverse_contradict=round(1.0 - raw_fallback, 4),
+                        forward_entail=rounded_fallback,
+                        reverse_entail=rounded_fallback,
+                        max_contradiction=rounded_contra,
+                        forward_contradict=rounded_contra,
+                        reverse_contradict=rounded_contra,
                     )
                 )
             return fallback_details
 
         import torch
 
-        unique_dir_pairs: list[tuple[str, str]] = []
-        dir_index_by_pair: dict[tuple[str, str], int] = {}
-        pair_dir_indices: list[tuple[int, int]] = []
-
-        for s1, s2 in pairs:
-            n1 = normalize_sentence(s1)
-            n2 = normalize_sentence(s2)
-            fwd_key = (n1, n2)
-            rev_key = (n2, n1)
-            fwd_idx = dir_index_by_pair.get(fwd_key)
-            if fwd_idx is None:
-                fwd_idx = len(unique_dir_pairs)
-                dir_index_by_pair[fwd_key] = fwd_idx
-                unique_dir_pairs.append(fwd_key)
-            rev_idx = dir_index_by_pair.get(rev_key)
-            if rev_idx is None:
-                rev_idx = len(unique_dir_pairs)
-                dir_index_by_pair[rev_key] = rev_idx
-                unique_dir_pairs.append(rev_key)
-            pair_dir_indices.append((fwd_idx, rev_idx))
+        unique_dir_pairs, pair_dir_indices = _deduplicate_directional_pairs(pairs)
 
         probs_all: list[list[float]] = []
         with torch.inference_mode():

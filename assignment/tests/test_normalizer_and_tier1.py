@@ -312,3 +312,171 @@ def test_evaluate_uncached_pairs_and_nli_warm_up_without_db_mutation():
     assert outputs[0].score == 0.99
     assert all(out.cached is False for out in outputs)
     assert JudgmentRecord.objects.count() == 0
+
+
+def test_has_substantive_content_and_internal_zwj_preservation():
+    from assignment.services.normalizer import has_substantive_content
+
+    for empty_or_non_substantive in (
+        "",
+        "   ",
+        "\u3000\t\n",
+        "...",
+        "!!!",
+        "。。。",
+        "！？",
+        "---",
+        "\u200b",
+        "\ufeff",
+        "\u200c\u200d",
+        "\u200b。。。",
+    ):
+        assert has_substantive_content(empty_or_non_substantive) is False
+
+    for valid in ("456", "猫", "Hello!", "👨‍👩‍👧", "👨‍👩‍👧が笑う", "👨‍👩‍👧が微笑む"):
+        assert has_substantive_content(valid) is True
+
+    # Internal Unicode ZWJ (\u200d) must NOT be stripped from meaningful text
+    norm_emoji = normalize_sentence("　👨‍👩‍👧が笑う！　")
+    assert "\u200d" in norm_emoji
+    assert norm_emoji == "👨‍👩‍👧が笑う"
+
+
+def test_nli_ensure_tokenizer_caching_and_offline_bypass(monkeypatch, settings):
+    import transformers
+
+    from assignment.services.nli_engine import HuggingFaceNLIEngine
+
+    load_calls: list[tuple[str, bool | None]] = []
+
+    def fake_from_pretrained(name, **kwargs):
+        load_calls.append((name, kwargs.get("local_files_only")))
+        if kwargs.get("local_files_only"):
+            raise OSError("not in local cache")
+        return lambda premises, hypotheses, **_kw: {"input_ids": [[1, 2, 3]] * len(premises)}
+
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", fake_from_pretrained)
+
+    # Disabled model must never load or require HF tokenizer files
+    settings.NLI_ENABLE_MODEL = False
+    disabled_engine = HuggingFaceNLIEngine("mock/disabled-tok")
+    assert disabled_engine.ensure_tokenizer() is None
+    assert disabled_engine.count_pair_tokens("alpha", "beta") == 0
+    assert load_calls == []
+
+    # Enabled model caches tokenizer once across calls (trying local_files_only=True then hub)
+    settings.NLI_ENABLE_MODEL = True
+    enabled_engine = HuggingFaceNLIEngine("mock/cached-tok")
+    tok1 = enabled_engine.ensure_tokenizer()
+    tok2 = enabled_engine.ensure_tokenizer()
+    assert tok1 is not None
+    assert tok1 is tok2
+    assert load_calls == [("mock/cached-tok", True), ("mock/cached-tok", None)]
+
+    # Disabling model after tokenizer is cached still bypasses tokenization
+    settings.NLI_ENABLE_MODEL = False
+    assert enabled_engine.ensure_tokenizer() is None
+    assert enabled_engine.count_pair_tokens("alpha", "beta") == 0
+
+
+def test_nli_count_pair_tokens_checks_both_directions_without_truncation(monkeypatch, settings):
+    from assignment.services.judge_service import validate_pairs_token_limits
+    from assignment.services.nli_engine import (
+        NLI_MAX_LENGTH,
+        HuggingFaceNLIEngine,
+        TokenLimitExceededError,
+        nli_engine,
+    )
+
+    settings.NLI_ENABLE_MODEL = True
+    engine = HuggingFaceNLIEngine("mock/asymmetric-tok")
+    captured_kwargs: list[dict[str, object]] = []
+
+    def asymmetric_tokenizer(premises, hypotheses, **kwargs):
+        captured_kwargs.append(dict(kwargs))
+        lengths = [
+            NLI_MAX_LENGTH + 1 if p == "short" and h == "reverse-overflow" else 10
+            for p, h in zip(premises, hypotheses, strict=True)
+        ]
+        return {"input_ids": [[0] * length for length in lengths]}
+
+    engine._tokenizer = asymmetric_tokenizer
+    engine._tokenizer_model_name = engine.model_name
+
+    assert engine.count_pair_tokens("reverse-overflow", "short") == NLI_MAX_LENGTH + 1
+    assert captured_kwargs and captured_kwargs[0].get("truncation") is False
+
+    # Also verify judge_service.validate_pairs_token_limits raises on reverse-direction overflow
+    monkeypatch.setattr(nli_engine, "_tokenizer", asymmetric_tokenizer)
+    monkeypatch.setattr(nli_engine, "_tokenizer_model_name", nli_engine.model_name)
+    with pytest.raises(TokenLimitExceededError):
+        validate_pairs_token_limits([("reverse-overflow", "short")])
+
+
+def test_nli_offline_fallback_rounds_directional_entail_and_ensure_loaded_orders_model_last(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    import transformers
+
+    from assignment.services.nli_engine import HuggingFaceNLIEngine
+    from assignment.services.normalizer import Tier1Result
+
+    offline_engine = HuggingFaceNLIEngine("mock/offline-round")
+    monkeypatch.setattr(offline_engine, "_ensure_loaded", lambda: False)
+    t1 = Tier1Result(
+        decisive=False,
+        label="NO_ENTAIL",
+        score=0.0,
+        reason="mock",
+        canonical_s1="alpha",
+        canonical_s2="beta",
+        fallback_score=0.49996,
+    )
+    detail = offline_engine.score_pairs_batch([("alpha", "beta")], [t1])[0]
+    assert detail.score == 0.5
+    assert detail.forward_entail == 0.5
+    assert detail.reverse_entail == 0.5
+
+    # Verify _ensure_loaded populates metadata fields before _model becomes non-None
+    class OrderedEngine(HuggingFaceNLIEngine):
+        def __init__(self, model_name: str):
+            self.set_order: list[str] = []
+            super().__init__(model_name)
+
+        def __setattr__(self, name, value):
+            if hasattr(self, "set_order") and name in {
+                "_tokenizer",
+                "_tokenizer_model_name",
+                "_entail_idx",
+                "_contradict_idx",
+                "model_revision",
+                "_model",
+            }:
+                if value is not None:
+                    self.set_order.append(name)
+            super().__setattr__(name, value)
+
+    class FakeModel:
+        config = SimpleNamespace(
+            id2label={0: "entailment", 1: "neutral", 2: "contradiction"},
+            num_labels=3,
+            _commit_hash="rev-order-1",
+        )
+
+        def eval(self):
+            return self
+
+    monkeypatch.setattr(
+        transformers.AutoTokenizer, "from_pretrained", lambda _name, **_kw: object()
+    )
+    monkeypatch.setattr(
+        transformers.AutoModelForSequenceClassification,
+        "from_pretrained",
+        lambda _name: FakeModel(),
+    )
+    ordered = OrderedEngine("mock/order-check")
+    assert ordered._ensure_loaded() is True
+    assert ordered.set_order[-1] == "_model"
+    assert {"_entail_idx", "_contradict_idx", "model_revision"}.issubset(ordered.set_order[:-1])
