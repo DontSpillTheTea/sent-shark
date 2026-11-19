@@ -40,24 +40,34 @@ Full request/response schemas, headers, and error examples are documented in [op
 
 ## Approach
 
-Pairs pass through a single two-tier pipeline (`exact_plus_nli:v2:min`):
+Each request flows through the pipeline below:
 
-1. **Exact-match fast path:** After `NFKC` normalization, whitespace collapse, and edge punctuation trimming (case-insensitive for English), identical sentences return `ENTAIL` with score `0.99` without loading the model.
-2. **Bidirectional NLI scoring:** Non-identical pairs run in both directions through `MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli` (with fail-closed `id2label` index resolution), scored by `score = min(P_entail(A -> B), P_entail(B -> A))` and classified `ENTAIL` if `score >= 0.50` (`NO_ENTAIL` otherwise).
+```mermaid
+flowchart TD
+    A["Request"] --> B["Validation & rate limiting"]
+    B --> C["Cache lookup"]
+    C -->|Hit| G["Response"]
+    C -->|Miss| D["Exact-match check"]
+    D -->|Match| F["Persistence"]
+    D -->|No match| E["Bidirectional NLI"]
+    E --> F
+    F --> G
+```
 
-Threshold comparison uses the unrounded minimum score before rounding responses to 4 decimal places. Taking the minimum directly enforces symmetric semantic equivalence: strong forward entailment cannot mask weak reverse entailment when one sentence adds unsupported meaning, while mild register or intensity shifts between paraphrases still clear `0.50`.
+Normalized identical sentences (after `NFKC`, whitespace collapse, and edge punctuation trimming; case-insensitive for English) short-circuit at `ENTAIL` (`0.99`). Non-identical pairs are scored in both directions with `MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli`:
+
+$$
+s(A,B) = \min(p_{A\to B}, p_{B\to A})
+$$
+
+Here $p_{A\to B}$ and $p_{B\to A}$ denote the cross-encoder entailment probabilities for $A \to B$ and $B \to A$, respectively. A pair is labeled `ENTAIL` when the unrounded minimum score is at least `0.50` (`NO_ENTAIL` otherwise), requiring support in both directions so one-way entailment is rejected without claiming the formula guarantees semantic equivalence.
 
 ## Reliability and Testing
 
-Judgments persist to PostgreSQL (SQLite WAL locally) under a unique `JudgmentRecord.pair_hash` keyed on the canonical sorted pair plus every prediction-affecting setting (model name and revision, enable flag, label indices, scoring policy, and threshold). Bulk writes sort hashes and use `bulk_create(..., ignore_conflicts=True)` alongside a bounded in-process LRU cache and singleflight request coalescing for duplicate cold bursts. `RequestAuditLog` logs every `/judge*` outcome without storing sentence text.
+Stored judgments are deduplicated in PostgreSQL via a symmetric hash over normalized text and scoring configuration so repeated or reversed pairs are evaluated once. An in-memory LRU cache and singleflight coalescing handle repeated lookups and concurrent cold misses without duplicate writes, while `RequestAuditLog` records every `/judge*` outcome without storing sentence text.
 
 ```bash
-.venv/bin/pytest -m "not integration" -v
 .venv/bin/pytest -v
-.venv/bin/ruff check .
-.venv/bin/ruff format --check .
-.venv/bin/python manage.py check
-.venv/bin/python manage.py makemigrations --check --dry-run
 .venv/bin/python manage.py run_eval --dataset dev --diagnostics --json
 .venv/bin/python manage.py run_eval --dataset dev_diagnostic --diagnostics --json
 ```
@@ -68,10 +78,10 @@ Metrics below measure `exact_plus_nli:v2:min` strictly on two 60-pair developmen
 
 | Dataset | Overall | Japanese (`ja`) | English (`en`) |
 |---|---|---|---|
-| `dev` (60) | `0.8167` (49/60) | `0.8750` (28/32) | `0.7500` (21/28) |
-| `dev_diagnostic` (60) | `0.6333` (38/60) | `0.7500` (30/40) | `0.4000` (8/20) |
+| `dev` (60) | `81.7%` (49/60) | `87.5%` (28/32) | `75.0%` (21/28) |
+| `dev_diagnostic` (60) | `63.3%` (38/60) | `75.0%` (30/40) | `40.0%` (8/20) |
 
-- **Word-order and particle swaps:** Zero-shot XNLI remains sensitive to lexical overlap, scoring `1/10` on `dev_diagnostic` `adversarial_swap` pairs.
+- **Word-order and particle swaps:** Zero-shot XNLI remains sensitive to lexical overlap, scoring `10.0%` (`1/10`) on `dev_diagnostic` `adversarial_swap` pairs.
 - **Borderline paraphrase recall:** Requiring both directions to exceed `0.50` improves directional clarity over averaging with a contradiction penalty, while rejecting paraphrases if one direction dips below threshold.
 - **Single-process state:** The in-memory rate limiter and LRU cache protect single-worker deployments; multi-worker horizontal scaling requires shared Redis state.
 
@@ -79,4 +89,4 @@ Metrics below measure `exact_plus_nli:v2:min` strictly on two 60-pair developmen
 
 1. **Japanese linguistic fine-tuning:** Fine-tune on particle-scrambling, role-inversion, and paraphrase-swap examples alongside Japanese NLI corpora (`JSICK`, `JGLUE JNLI`, `PAWS-X`) to counter surface-overlap bias (Yanaka & Mineshima, 2022; Kurihara et al., 2022; Yang et al., 2019).
 2. **Context-aware semantic judgment:** Pass surrounding dialogue turns or panel context when judging short lines so Japanese pro-drop (omitted subjects and objects) and ellipsis resolve unambiguously.
-3. **Uncertainty-aware escalation:** Route low-confidence or strongly asymmetric pairs (near `0.50` or high `|P_entail(A -> B) - P_entail(B -> A)|`) to a stronger model only when justified by an independent evaluation set.
+3. **Uncertainty-aware escalation:** Route low-confidence or strongly asymmetric pairs (near `0.50` or large $|p_{A\to B} - p_{B\to A}|$) to a stronger model only when justified by an independent evaluation set.
