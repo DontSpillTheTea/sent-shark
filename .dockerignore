@@ -1,0 +1,35 @@
+# Version control & local virtual environments
+.git/
+.venv/
+
+# Local research, specs, audits & agent state
+.local_docs/
+.superpowers/
+
+# Python caches & compiled bytecode
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+**/*.pyc
+*.py[cod]
+**/*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.coverage
+htmlcov/
+
+# Local SQLite databases, logs & OS metadata
+db.sqlite3*
+test_db.sqlite3*
+*.log
+.DS_Store
+
+# Environment secrets (preserve example templates needed for setup)
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
