@@ -44,7 +44,7 @@ Each request flows through the pipeline below:
 
 ![Sentence judgment request pipeline](docs/images/pipeline.svg)
 
-Normalized identical sentences (after `NFKC`, whitespace collapse, and edge punctuation trimming; case-insensitive for English) short-circuit at `ENTAIL` (`0.99`). Non-identical pairs are scored in both directions with `MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli`:
+Normalized identical sentences (after `NFKC`, whitespace collapse, and edge punctuation trimming; case-insensitive for English) short-circuit at `ENTAIL` (`0.99`). Non-identical pairs are scored in both directions with [`MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli`](https://huggingface.co/MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli):
 
 $$
 s(A,B) = \min(p_{A\to B}, p_{B\to A})
@@ -64,7 +64,7 @@ Stored judgments are deduplicated in PostgreSQL via a symmetric hash over normal
 
 ## Accuracy and Limitations
 
-Metrics below measure `exact_plus_nli:v2:min` strictly on two 60-pair development fixtures—curated `dev` (`eval_gauntlet.json`) and `JGLUE JNLI`/`PAWS-X` `dev_diagnostic` (`eval_holdout.json`). They characterize behavior and failure modes and are **not** independent estimates of production generalization accuracy.
+Metrics below measure `exact_plus_nli:v2:min` strictly on two 60-pair development fixtures—authored `dev` (`eval_gauntlet.json`) and `dev_diagnostic` (`eval_holdout.json`), which adapts paired directional examples from [JGLUE JNLI](https://github.com/yahoojapan/JGLUE) ([Kurihara et al., 2022](https://aclanthology.org/2022.lrec-1.317/)) and [PAWS-X](https://github.com/google-research-datasets/paws) ([Yang et al., 2019](https://aclanthology.org/D19-1382/); [HF mirror](https://huggingface.co/datasets/google-research-datasets/paws-x)). They characterize behavior and failure modes and are **not** independent estimates of production generalization accuracy; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for dataset attribution, relabeling details, and `CC BY-SA 4.0` / PAWS-X license terms.
 
 | Dataset | Overall | Japanese (`ja`) | English (`en`) |
 |---|---|---|---|
@@ -77,6 +77,6 @@ Metrics below measure `exact_plus_nli:v2:min` strictly on two 60-pair developmen
 
 ## Three Future Accuracy Improvements
 
-1. **Japanese linguistic fine-tuning:** Fine-tune on particle-scrambling, role-inversion, and paraphrase-swap examples alongside Japanese NLI corpora (`JSICK`, `JGLUE JNLI`, `PAWS-X`) to counter surface-overlap bias (Yanaka & Mineshima, 2022; Kurihara et al., 2022; Yang et al., 2019).
+1. **Japanese linguistic fine-tuning:** Fine-tune on particle-scrambling, role-inversion, and paraphrase-swap examples alongside Japanese NLI corpora ([JSICK](https://aclanthology.org/2022.tacl-1.73/) — Yanaka & Mineshima, 2022; JGLUE JNLI; PAWS-X) to counter surface-overlap bias.
 2. **Context-aware semantic judgment:** Pass surrounding dialogue turns or panel context when judging short lines so Japanese pro-drop (omitted subjects and objects) and ellipsis resolve unambiguously.
 3. **Uncertainty-aware escalation:** Route low-confidence or strongly asymmetric pairs (near `0.50` or large $|p_{A\to B} - p_{B\to A}|$) to a stronger model only when justified by an independent evaluation set.
