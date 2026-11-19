@@ -915,7 +915,7 @@ class Command(BaseCommand):
             model_name = getattr(
                 settings,
                 "NLI_MODEL_NAME",
-                "MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli",
+                "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli",
             )
 
         # Pre-warm NLI cross-encoder before timing so weight loading does not skew latencies

@@ -216,7 +216,7 @@ def _resolve_cache_config(
     resolved_model = model_name or getattr(
         settings,
         "NLI_MODEL_NAME",
-        "MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli",
+        "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli",
     )
     resolved_enabled = (
         bool(getattr(settings, "NLI_ENABLE_MODEL", True))

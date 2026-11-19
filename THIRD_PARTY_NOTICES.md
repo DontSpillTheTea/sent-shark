@@ -4,8 +4,8 @@ This document records licensing, attribution, and modification notices for exter
 
 ## 1. Pretrained Model (Runtime / Docker Download Only)
 
-- **Model:** [`MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli`](https://huggingface.co/MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli) (MIT License)
-- **Redistribution:** Not committed to Git; downloaded at container build time or first inference. Based on Microsoft's `multilingual-MiniLM-L12-H384` ([MiniLM](https://github.com/microsoft/unilm/tree/master/minilm)) and fine-tuned on MultiNLI and XNLI.
+- **Model:** [`MoritzLaurer/mDeBERTa-v3-base-mnli-xnli`](https://huggingface.co/MoritzLaurer/mDeBERTa-v3-base-mnli-xnli) (MIT License; pinned revision `8adb042d524ecd5c26d3e3ba0e3fbcf7e2d0864c`)
+- **Redistribution:** Not committed to Git; downloaded at container build time or first inference. Based on Microsoft's [`microsoft/mdeberta-v3-base`](https://huggingface.co/microsoft/mdeberta-v3-base) (MIT License) and fine-tuned on MultiNLI and XNLI.
 
 ## 2. Committed Evaluation Fixtures (`assignment/tests/fixtures/`)
 

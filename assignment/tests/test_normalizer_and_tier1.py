@@ -74,7 +74,7 @@ def test_removed_tier1_heuristic_helpers_absent():
         ("私は柴犬を飼っている。", "私は動物を飼っている。", "NO_ENTAIL"),
         ("会議は来週の月曜日に延期された。", "会議は今週の金曜日に前倒しされた。", "NO_ENTAIL"),
         ("The car is red.", "The automobile is blue.", "NO_ENTAIL"),
-        ("A wolf is a canine.", "A wolf is a dog.", "NO_ENTAIL"),
+        ("She ate a steak for dinner.", "She ate a beefsteak for dinner.", "NO_ENTAIL"),
     ],
 )
 def test_nli_end_to_end_paraphrases_contradictions_and_hypernyms(sentence1, sentence2, expected):

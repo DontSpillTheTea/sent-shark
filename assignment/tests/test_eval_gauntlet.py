@@ -245,8 +245,8 @@ def test_run_tier2_mode_scores_raw_normalized_inputs_without_rewrites(monkeypatc
     assert len(latencies) == 1
     assert len(calls) == 2
     assert all(call["has_tier1"] for call in calls)
-    # Without dev-overfit surface rewrites, raw MiniLM scores G21 as NO_ENTAIL
-    assert preds[0][0] == "NO_ENTAIL"
+    # mDeBERTa-v3-base-mnli-xnli scores T2_ISO ("gave up smoking" / "quit smoking") as ENTAIL
+    assert preds[0][0] == "ENTAIL"
 
     s1, s2 = "He gave up smoking last year.", "He quit smoking a year ago."
     neutral = Tier1Result(
@@ -268,7 +268,7 @@ def test_run_tier2_mode_scores_raw_normalized_inputs_without_rewrites(monkeypatc
 
     monkeypatch.setattr(nli_mod.nli_engine, "_tokenizer", recording_tokenizer)
     raw_detail = original_fn([(s1, s2)], [neutral])[0]
-    assert raw_detail.label == "NO_ENTAIL"
+    assert raw_detail.label == "ENTAIL"
     assert len(captured_sequences) == 1
     assert captured_sequences[0] == (
         ["He gave up smoking last year", "He quit smoking a year ago"],
@@ -737,8 +737,11 @@ def test_run_eval_supports_ablation_and_misclassification_diagnostics(tmp_path, 
     assert exact_by_id["D3_EXACT_MISMATCH"]["score"] == 0.99
     assert exact_by_id["D3_EXACT_MISMATCH"]["directional_nli"] is None
 
-    assert "D2" in exact_by_id
-    d2_err = exact_by_id["D2"]
+    # mDeBERTa-v3 correctly classifies the D2 word-order swap as NO_ENTAIL
+    assert "D2" not in exact_by_id
+
+    assert "D4_NLI_MISMATCH" in exact_by_id
+    d4_err = exact_by_id["D4_NLI_MISMATCH"]
     for key in (
         "id",
         "source",
@@ -755,22 +758,16 @@ def test_run_eval_supports_ablation_and_misclassification_diagnostics(tmp_path, 
         "directional_nli",
         "error_category",
     ):
-        assert key in d2_err
-    assert d2_err["source_id"] == 2
-    assert d2_err["origin_tier"] == "tier2_nli"
-    assert d2_err["tier1_reason"] == "non_identical"
-    assert d2_err["error_category"] == "word_order_or_particle_swap"
-    dnli = d2_err["directional_nli"]
+        assert key in d4_err
+    assert d4_err["source_id"] == "4"
+    assert d4_err["origin_tier"] == "tier2_nli"
+    assert d4_err["tier1_reason"] == "non_identical"
+    assert d4_err["error_category"] == "negation_or_antonym"
+    dnli = d4_err["directional_nli"]
     assert isinstance(dnli, dict)
     assert set(dnli.keys()) == {"p_entail_fwd", "p_entail_rev", "p_contra_fwd", "p_contra_rev"}
     for val in dnli.values():
         assert isinstance(val, float) and 0.0 <= val <= 1.0
-
-    assert "D4_NLI_MISMATCH" in exact_by_id
-    assert exact_by_id["D4_NLI_MISMATCH"]["origin_tier"] == "tier2_nli"
-    assert exact_by_id["D4_NLI_MISMATCH"]["tier1_reason"] == "non_identical"
-    assert exact_by_id["D4_NLI_MISMATCH"]["error_category"] == "negation_or_antonym"
-    assert isinstance(exact_by_id["D4_NLI_MISMATCH"]["directional_nli"], dict)
 
     # 2. Test nli_only with --diagnostics (even exact matches route to tier2_nli)
     out_nli = StringIO()
@@ -792,8 +789,9 @@ def test_run_eval_supports_ablation_and_misclassification_diagnostics(tmp_path, 
     assert nli_by_id["D3_EXACT_MISMATCH"]["origin_tier"] == "tier2_nli"
     assert nli_by_id["D3_EXACT_MISMATCH"]["tier1_reason"] == "tier2_only"
     assert isinstance(nli_by_id["D3_EXACT_MISMATCH"]["directional_nli"], dict)
-    assert "D2" in nli_by_id
-    assert nli_by_id["D2"]["origin_tier"] == "tier2_nli"
+    assert "D2" not in nli_by_id
+    assert "D4_NLI_MISMATCH" in nli_by_id
+    assert nli_by_id["D4_NLI_MISMATCH"]["origin_tier"] == "tier2_nli"
 
     # 3. Test --dataset dev_diagnostic works cleanly with --diagnostics
     out_dd = StringIO()

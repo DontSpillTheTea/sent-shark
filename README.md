@@ -12,7 +12,7 @@ Start PostgreSQL 15 and the API server with Docker Compose:
 docker compose up --build
 ```
 
-The image pre-caches `MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli` under `HF_HOME=/app/.cache/huggingface`. Local Python runs download weights on first inference; set `NLI_ENABLE_MODEL=false` for an offline exact-match fallback that enforces character limits without Hugging Face files.
+The image pre-caches `MoritzLaurer/mDeBERTa-v3-base-mnli-xnli` (pinned revision `8adb042d524ecd5c26d3e3ba0e3fbcf7e2d0864c`) under `HF_HOME=/app/.cache/huggingface`. Local Python runs download weights on first inference; set `NLI_ENABLE_MODEL=false` for an offline exact-match fallback that enforces character limits without Hugging Face files.
 
 Verify liveness and judge a pair (or open `http://localhost:8000/playground` in a browser):
 
@@ -25,7 +25,7 @@ curl -s -X POST http://localhost:8000/judge \
 ```
 
 ```json
-{"label":"ENTAIL","score":0.921}
+{"label":"ENTAIL","score":0.9971}
 ```
 
 ## API
@@ -44,7 +44,7 @@ Each request flows through the pipeline below:
 
 ![Sentence judgment request pipeline](docs/images/pipeline.svg)
 
-Normalized identical sentences (after `NFKC`, whitespace collapse, and edge punctuation trimming; case-insensitive for English) short-circuit at `ENTAIL` (`0.99`). Non-identical pairs are scored in both directions with [`MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli`](https://huggingface.co/MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli):
+Normalized identical sentences (after `NFKC`, whitespace collapse, and edge punctuation trimming; case-insensitive for English) short-circuit at `ENTAIL` (`0.99`). Non-identical pairs are scored in both directions with [`MoritzLaurer/mDeBERTa-v3-base-mnli-xnli`](https://huggingface.co/MoritzLaurer/mDeBERTa-v3-base-mnli-xnli):
 
 $$
 s(A,B) = \min(p_{A\to B}, p_{B\to A})
@@ -68,10 +68,10 @@ Metrics below measure `exact_plus_nli:v2:min` strictly on two 60-pair developmen
 
 | Dataset | Overall | Japanese (`ja`) | English (`en`) |
 |---|---|---|---|
-| `dev` (60) | `81.7%` (49/60) | `87.5%` (28/32) | `75.0%` (21/28) |
-| `dev_diagnostic` (60) | `63.3%` (38/60) | `75.0%` (30/40) | `40.0%` (8/20) |
+| `dev` (60) | `98.3%` (59/60) | `100.0%` (32/32) | `96.4%` (27/28) |
+| `dev_diagnostic` (60) | `85.0%` (51/60) | `85.0%` (34/40) | `85.0%` (17/20) |
 
-- **Word-order and particle swaps:** Zero-shot XNLI remains sensitive to lexical overlap, scoring `10.0%` (`1/10`) on `dev_diagnostic` `adversarial_swap` pairs.
+- **Cross-script lexical equivalents and swaps:** Because `mDeBERTa-v3-base-mnli-xnli` is fine-tuned on English MNLI and the 15-language XNLI split (which excludes Japanese), certain zero-shot cross-script loanword equivalents such as `牛肉`/`ビーフ` and `牛肉のステーキ`/`ビーフステーキ` are still incorrectly rejected as contradictions, and `2/10` (`80.0%` accuracy) `dev_diagnostic` `adversarial_swap` pairs remain misclassified.
 - **Borderline paraphrase recall:** Requiring both directions to exceed `0.50` improves directional clarity over averaging with a contradiction penalty, while rejecting paraphrases if one direction dips below threshold.
 - **Single-process state:** The in-memory rate limiter and LRU cache protect single-worker deployments; multi-worker horizontal scaling requires shared Redis state.
 

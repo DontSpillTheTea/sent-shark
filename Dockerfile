@@ -4,7 +4,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     HF_HOME=/app/.cache/huggingface \
-    NLI_MODEL_NAME=MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli
+    NLI_MODEL_NAME=MoritzLaurer/mDeBERTa-v3-base-mnli-xnli \
+    NLI_MODEL_REVISION=8adb042d524ecd5c26d3e3ba0e3fbcf7e2d0864c
 
 WORKDIR /app
 
@@ -21,9 +22,9 @@ RUN pip install --upgrade pip && \
 # Pre-download and cache the NLI Cross-Encoder into the container image
 # so docker compose up boots immediately without runtime model downloads.
 RUN python -c "from transformers import AutoTokenizer, AutoModelForSequenceClassification; \
-    m = '${NLI_MODEL_NAME}'; \
-    AutoTokenizer.from_pretrained(m); \
-    AutoModelForSequenceClassification.from_pretrained(m)"
+    m = '${NLI_MODEL_NAME}'; r = '${NLI_MODEL_REVISION}'; \
+    AutoTokenizer.from_pretrained(m, revision=r); \
+    AutoModelForSequenceClassification.from_pretrained(m, revision=r)"
 
 COPY . .
 

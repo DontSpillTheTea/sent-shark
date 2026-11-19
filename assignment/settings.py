@@ -119,7 +119,16 @@ def _optional_int_env(name: str) -> int | None:
 
 
 # Entailment Judge & Rate Limit Configuration
-NLI_MODEL_NAME = os.environ.get("NLI_MODEL_NAME", "MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli")
+DEFAULT_NLI_MODEL_NAME = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
+DEFAULT_NLI_MODEL_REVISION = "8adb042d524ecd5c26d3e3ba0e3fbcf7e2d0864c"
+NLI_MODEL_NAME = os.environ.get("NLI_MODEL_NAME", DEFAULT_NLI_MODEL_NAME)
+NLI_MODEL_REVISION = (
+    os.environ.get(
+        "NLI_MODEL_REVISION",
+        DEFAULT_NLI_MODEL_REVISION if NLI_MODEL_NAME == DEFAULT_NLI_MODEL_NAME else "",
+    ).strip()
+    or None
+)
 NLI_ENABLE_MODEL = os.environ.get("NLI_ENABLE_MODEL", "true").lower() == "true"
 NLI_ENTAIL_INDEX = _optional_int_env("NLI_ENTAIL_INDEX")
 NLI_CONTRADICT_INDEX = _optional_int_env("NLI_CONTRADICT_INDEX")

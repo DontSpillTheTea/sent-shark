@@ -372,3 +372,29 @@ def test_cold_model_load_rekeys_cache_to_resolved_model_revision(monkeypatch):
     assert second.score == 0.88
     assert call_counter["count"] == 1
     assert JudgmentRecord.objects.count() == 1
+
+
+def test_default_mdeberta_revision_pinning_and_cache_isolation(settings):
+    from assignment.services import nli_engine as nli_mod
+    from assignment.services.judge_service import compute_pair_hash
+
+    assert settings.DEFAULT_NLI_MODEL_NAME == "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
+    assert settings.DEFAULT_NLI_MODEL_REVISION == "8adb042d524ecd5c26d3e3ba0e3fbcf7e2d0864c"
+    assert (
+        nli_mod._configured_revision_for_model("MoritzLaurer/mDeBERTa-v3-base-mnli-xnli")
+        == "8adb042d524ecd5c26d3e3ba0e3fbcf7e2d0864c"
+    )
+
+    h_mdeberta, _, _ = compute_pair_hash(
+        "母は夕食を作る。",
+        "母は晩ご飯を作る。",
+        model_name="MoritzLaurer/mDeBERTa-v3-base-mnli-xnli",
+        model_revision="8adb042d524ecd5c26d3e3ba0e3fbcf7e2d0864c",
+    )
+    h_minilm, _, _ = compute_pair_hash(
+        "母は夕食を作る。",
+        "母は晩ご飯を作る。",
+        model_name="MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli",
+        model_revision="0a71e92a985b6e1ad1828cf67ce9c459639c1dca",
+    )
+    assert h_mdeberta != h_minilm

@@ -10,7 +10,7 @@ info:
     returns `NO_ENTAIL`, `0.0` for non-identical pairs using character-bound fallback without
     requiring Hugging Face tokenizer files), and
     (2) Tier 2 bidirectional Hugging Face NLI cross-encoder
-    (`MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli`), scored as
+    (`MoritzLaurer/mDeBERTa-v3-base-mnli-xnli`), scored as
     `raw_score = clamp(min(p_E(s1->s2), p_E(s2->s1)), 0.0, 1.0)` with unrounded classification
     `label = "ENTAIL"` iff `raw_score >= ENTAIL_THRESHOLD` (default `0.50`) and `"NO_ENTAIL"`
     otherwise, and serialized `score = round(raw_score, 4)`.
@@ -74,9 +74,9 @@ paths:
       responses:
         "200":
           description: >
-            Entailment classification and score in [0.0, 1.0]. Example score (`0.9210`, serialized
-            as JSON number `0.921`) is an illustrative sample output observed for the shown input
-            pair under `exact_plus_nli:v2:min` (`MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli`,
+            Entailment classification and score in [0.0, 1.0]. Example score (`0.9971`) is an
+            illustrative sample output observed for the shown input pair under
+            `exact_plus_nli:v2:min` (`MoritzLaurer/mDeBERTa-v3-base-mnli-xnli`,
             `ENTAIL_THRESHOLD=0.50`) and varies across inputs, models, and revisions.
           headers:
             X-RateLimit-Limit:
@@ -94,7 +94,7 @@ paths:
                   summary: Illustrative ENTAIL sample output under v2:min (scores vary by input pair)
                   value:
                     label: "ENTAIL"
-                    score: 0.9210
+                    score: 0.9971
         "400":
           $ref: "#/components/responses/ValidationError"
         "413":
@@ -137,10 +137,10 @@ paths:
       responses:
         "200":
           description: >
-            Ordered list of entailment judgments matching input order. Example scores (`0.9210` and
-            `0.0560`, serialized as JSON numbers `0.921` and `0.056`) are illustrative sample
-            outputs observed for `arrayPayload` under `exact_plus_nli:v2:min`
-            (`ENTAIL_THRESHOLD=0.50`) and vary across inputs, models, and revisions.
+            Ordered list of entailment judgments matching input order. Example scores (`0.9971` and
+            `0.0094`) are illustrative sample outputs observed for `arrayPayload` under
+            `exact_plus_nli:v2:min` (`ENTAIL_THRESHOLD=0.50`) and vary across inputs, models, and
+            revisions.
           headers:
             X-RateLimit-Limit:
               $ref: "#/components/headers/X-RateLimit-Limit"
@@ -159,9 +159,9 @@ paths:
                   summary: Illustrative batch output for arrayPayload under v2:min (scores vary by input pair)
                   value:
                     - label: "ENTAIL"
-                      score: 0.9210
+                      score: 0.9971
                     - label: "NO_ENTAIL"
-                      score: 0.0560
+                      score: 0.0094
         "400":
           $ref: "#/components/responses/BulkValidationError"
         "413":

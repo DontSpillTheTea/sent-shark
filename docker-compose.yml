@@ -27,7 +27,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_HOST: db
       POSTGRES_PORT: "5432"
-      NLI_MODEL_NAME: ${NLI_MODEL_NAME:-MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli}
+      NLI_MODEL_NAME: ${NLI_MODEL_NAME:-MoritzLaurer/mDeBERTa-v3-base-mnli-xnli}
+      NLI_MODEL_REVISION: ${NLI_MODEL_REVISION:-8adb042d524ecd5c26d3e3ba0e3fbcf7e2d0864c}
       NLI_ENABLE_MODEL: ${NLI_ENABLE_MODEL:-true}
     depends_on:
       db:

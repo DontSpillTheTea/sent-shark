@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 
 NLI_MAX_LENGTH = 256
 NLI_BATCH_SIZE = 64  # Up to 64 directional premise/hypothesis sequences per pass
+DEFAULT_NLI_MODEL_NAME = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
+DEFAULT_NLI_MODEL_REVISION = "8adb042d524ecd5c26d3e3ba0e3fbcf7e2d0864c"
 
 _NEGATED_ENTAIL_RE = re.compile(r"(?:^|[^a-z])(?:non|not|no)[\s_-]*entail")
 _NEGATED_CONTRADICT_RE = re.compile(r"(?:^|[^a-z])(?:non|not|no)[\s_-]*contradict")
@@ -57,6 +59,17 @@ def _deduplicate_directional_pairs(
     return unique_dir_pairs, pair_dir_indices
 
 
+def _configured_revision_for_model(model_name: str) -> str | None:
+    """Return pinned HuggingFace revision for the configured production model, if any."""
+    active_name = getattr(settings, "NLI_MODEL_NAME", DEFAULT_NLI_MODEL_NAME)
+    configured_rev = getattr(settings, "NLI_MODEL_REVISION", None)
+    if model_name == active_name and isinstance(configured_rev, str) and configured_rev.strip():
+        return configured_rev.strip()
+    if model_name == DEFAULT_NLI_MODEL_NAME:
+        return DEFAULT_NLI_MODEL_REVISION
+    return None
+
+
 def _resolve_hf_model_revision(model_name: str, model_config=None) -> str | None:
     """Resolve model commit revision from Transformers config or local HF cache snapshot."""
     commit_hash = getattr(model_config, "_commit_hash", None) if model_config is not None else None
@@ -67,7 +80,15 @@ def _resolve_hf_model_revision(model_name: str, model_config=None) -> str | None
             return None
         from huggingface_hub import snapshot_download
 
-        snapshot_path = snapshot_download(model_name, local_files_only=True)
+        pinned_rev = _configured_revision_for_model(model_name)
+        try:
+            snapshot_path = snapshot_download(
+                model_name,
+                revision=pinned_rev,
+                local_files_only=True,
+            )
+        except TypeError:
+            snapshot_path = snapshot_download(model_name, local_files_only=True)
         rev = Path(snapshot_path).name
         return rev or None
     except Exception:
@@ -96,7 +117,7 @@ class HuggingFaceNLIEngine:
         self.model_name = model_name or getattr(
             settings,
             "NLI_MODEL_NAME",
-            "MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli",
+            DEFAULT_NLI_MODEL_NAME,
         )
         self._lock = threading.Lock()
         self._tokenizer = None
@@ -223,9 +244,22 @@ class HuggingFaceNLIEngine:
     def _load_tokenizer(self):
         from transformers import AutoTokenizer
 
+        pinned_rev = _configured_revision_for_model(self.model_name)
         try:
+            if pinned_rev:
+                try:
+                    return AutoTokenizer.from_pretrained(
+                        self.model_name, revision=pinned_rev, local_files_only=True
+                    )
+                except TypeError:
+                    return AutoTokenizer.from_pretrained(self.model_name, local_files_only=True)
             return AutoTokenizer.from_pretrained(self.model_name, local_files_only=True)
         except Exception:
+            if pinned_rev:
+                try:
+                    return AutoTokenizer.from_pretrained(self.model_name, revision=pinned_rev)
+                except TypeError:
+                    return AutoTokenizer.from_pretrained(self.model_name)
             return AutoTokenizer.from_pretrained(self.model_name)
 
     def ensure_tokenizer(self):
@@ -333,7 +367,16 @@ class HuggingFaceNLIEngine:
                     tokenizer = self._tokenizer
                 else:
                     tokenizer = self._load_tokenizer()
-                model = AutoModelForSequenceClassification.from_pretrained(self.model_name)
+                pinned_rev = _configured_revision_for_model(self.model_name)
+                if pinned_rev:
+                    try:
+                        model = AutoModelForSequenceClassification.from_pretrained(
+                            self.model_name, revision=pinned_rev
+                        )
+                    except TypeError:
+                        model = AutoModelForSequenceClassification.from_pretrained(self.model_name)
+                else:
+                    model = AutoModelForSequenceClassification.from_pretrained(self.model_name)
                 model.eval()
 
                 entail_idx, contradict_idx = self._resolve_label_indices(model.config)
