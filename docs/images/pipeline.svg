@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 564" width="480" height="564" role="img" aria-labelledby="pipeline-title pipeline-desc">
+  <title id="pipeline-title">Sentence Judgment Request Pipeline</title>
+  <desc id="pipeline-desc">Top-to-bottom request flow: Request to Validate and rate limit, Cache lookup (shortcut Cache hit to Response; Miss to Exact-match check), Exact-match check (shortcut Exact match to Persistence; No match to Bidirectional NLI), Persistence, and Response.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#57606a"/>
+    </marker>
+    <marker id="arrow-hit" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#0969da"/>
+    </marker>
+    <marker id="arrow-match" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#8250df"/>
+    </marker>
+  </defs>
+
+  <!-- Canvas background for consistent contrast across light and dark themes -->
+  <rect x="0.5" y="0.5" width="479" height="563" rx="12" fill="#ffffff" stroke="#d1d9e0" stroke-width="1"/>
+
+  <!-- Main spine arrows (center x=240) -->
+  <line x1="240" y1="68" x2="240" y2="98" stroke="#57606a" stroke-width="1.75" marker-end="url(#arrow)"/>
+  <line x1="240" y1="144" x2="240" y2="174" stroke="#57606a" stroke-width="1.75" marker-end="url(#arrow)"/>
+  <line x1="240" y1="220" x2="240" y2="254" stroke="#57606a" stroke-width="1.75" marker-end="url(#arrow)"/>
+  <line x1="240" y1="300" x2="240" y2="334" stroke="#57606a" stroke-width="1.75" marker-end="url(#arrow)"/>
+  <line x1="240" y1="380" x2="240" y2="412" stroke="#57606a" stroke-width="1.75" marker-end="url(#arrow)"/>
+  <line x1="240" y1="458" x2="240" y2="492" stroke="#57606a" stroke-width="1.75" marker-end="url(#arrow)"/>
+
+  <!-- Cache-hit shortcut (left track x=56 -> Response) -->
+  <path d="M 132 198 L 64 198 Q 56 198 56 206 L 56 508 Q 56 516 64 516 L 130 516"
+        fill="none" stroke="#0969da" stroke-width="1.75" marker-end="url(#arrow-hit)"/>
+
+  <!-- Exact-match shortcut (right track x=424 -> Persistence) -->
+  <path d="M 348 278 L 416 278 Q 424 278 424 286 L 424 428 Q 424 436 416 436 L 350 436"
+        fill="none" stroke="#8250df" stroke-width="1.75" marker-end="url(#arrow-match)"/>
+
+  <!-- Main nodes (center x=240, width=216, height=44) -->
+  <rect x="132" y="24" width="216" height="44" rx="8" fill="#f6f8fa" stroke="#8c959f" stroke-width="1.4"/>
+  <text x="240" y="46" text-anchor="middle" dominant-baseline="central"
+        font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="14" font-weight="600" fill="#1f2328">Request</text>
+
+  <rect x="132" y="100" width="216" height="44" rx="8" fill="#f6f8fa" stroke="#8c959f" stroke-width="1.4"/>
+  <text x="240" y="122" text-anchor="middle" dominant-baseline="central"
+        font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="14" font-weight="600" fill="#1f2328">Validate &amp; rate limit</text>
+
+  <rect x="132" y="176" width="216" height="44" rx="8" fill="#ddf4ff" stroke="#54aeff" stroke-width="1.4"/>
+  <text x="240" y="198" text-anchor="middle" dominant-baseline="central"
+        font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="14" font-weight="600" fill="#0550ae">Cache lookup</text>
+
+  <rect x="132" y="256" width="216" height="44" rx="8" fill="#fbefff" stroke="#c297ff" stroke-width="1.4"/>
+  <text x="240" y="278" text-anchor="middle" dominant-baseline="central"
+        font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="14" font-weight="600" fill="#512a97">Exact-match check</text>
+
+  <rect x="132" y="336" width="216" height="44" rx="8" fill="#fff8c5" stroke="#d4a72c" stroke-width="1.4"/>
+  <text x="240" y="358" text-anchor="middle" dominant-baseline="central"
+        font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="14" font-weight="600" fill="#4d2d00">Bidirectional NLI</text>
+
+  <rect x="132" y="414" width="216" height="44" rx="8" fill="#f6f8fa" stroke="#8c959f" stroke-width="1.4"/>
+  <text x="240" y="436" text-anchor="middle" dominant-baseline="central"
+        font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="14" font-weight="600" fill="#1f2328">Persistence</text>
+
+  <rect x="132" y="494" width="216" height="44" rx="8" fill="#dafbe1" stroke="#4ac26b" stroke-width="1.4"/>
+  <text x="240" y="516" text-anchor="middle" dominant-baseline="central"
+        font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="14" font-weight="600" fill="#116329">Response</text>
+
+  <!-- Edge labels -->
+  <rect x="250" y="227" width="38" height="20" rx="4" fill="#ffffff"/>
+  <text x="269" y="237" text-anchor="middle" dominant-baseline="central"
+        font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="12" font-weight="600" fill="#57606a">Miss</text>
+
+  <rect x="250" y="307" width="64" height="20" rx="4" fill="#ffffff"/>
+  <text x="282" y="317" text-anchor="middle" dominant-baseline="central"
+        font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="12" font-weight="600" fill="#57606a">No match</text>
+
+  <rect x="14" y="345" width="84" height="26" rx="6" fill="#ddf4ff" stroke="#54aeff" stroke-width="1"/>
+  <text x="56" y="358" text-anchor="middle" dominant-baseline="central"
+        font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="12" font-weight="600" fill="#0550ae">Cache hit</text>
+
+  <rect x="379" y="345" width="90" height="26" rx="6" fill="#fbefff" stroke="#c297ff" stroke-width="1"/>
+  <text x="424" y="358" text-anchor="middle" dominant-baseline="central"
+        font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="12" font-weight="600" fill="#512a97">Exact match</text>
+</svg>

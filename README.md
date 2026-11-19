@@ -42,17 +42,7 @@ Full request/response schemas, headers, and error examples are documented in [op
 
 Each request flows through the pipeline below:
 
-```mermaid
-flowchart TD
-    A["Request"] --> B["Validation & rate limiting"]
-    B --> C["Cache lookup"]
-    C -->|Hit| G["Response"]
-    C -->|Miss| D["Exact-match check"]
-    D -->|Match| F["Persistence"]
-    D -->|No match| E["Bidirectional NLI"]
-    E --> F
-    F --> G
-```
+![Sentence judgment request pipeline](docs/images/pipeline.svg)
 
 Normalized identical sentences (after `NFKC`, whitespace collapse, and edge punctuation trimming; case-insensitive for English) short-circuit at `ENTAIL` (`0.99`). Non-identical pairs are scored in both directions with `MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli`:
 
