@@ -3,10 +3,29 @@ info:
   title: Same-Language Entailment Judge API
   version: 0.1.0
   description: >
-    Determines whether two same-language sentences convey the same meaning (entailment)
-    using a 2-Tier Hybrid NLI Pipeline (Tier 1 Exact Normalized Match Gate + Tier 2
-    Bidirectional HuggingFace NLI Cross-Encoder).
-    `/judge` and `/judge/bulk` enforce a 5 req/s per-`client_ip` sliding-window rate limit.
+    Determines whether two same-language sentences (`ja-ja` or `en-en`) convey the same meaning
+    (`ENTAIL` or `NO_ENTAIL`) using a sole 2-Tier Hybrid NLI Pipeline (`exact_plus_nli:v2:min`):
+    (1) Tier 1 exact normalized match (`NFKC` + whitespace collapse + edge punctuation trim,
+    case-insensitive for English -> `ENTAIL`, `0.99`; offline fallback `NLI_ENABLE_MODEL=false`
+    returns `NO_ENTAIL`, `0.0` for non-identical pairs using character-bound fallback without
+    requiring Hugging Face tokenizer files), and
+    (2) Tier 2 bidirectional Hugging Face NLI cross-encoder
+    (`MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli`), scored as
+    `raw_score = clamp(min(p_E(s1->s2), p_E(s2->s1)), 0.0, 1.0)` with unrounded classification
+    `label = "ENTAIL"` iff `raw_score >= ENTAIL_THRESHOLD` (default `0.50`) and `"NO_ENTAIL"`
+    otherwise, and serialized `score = round(raw_score, 4)`.
+    Inputs must be strict JSON strings (non-string scalars rejected with `400`), contain at least
+    one substantive Unicode letter/number/symbol after normalization, stay within `2000` chars per
+    sentence, and fit within `NLI_MAX_LENGTH=256` combined tokens per direction (no silent
+    truncation; excess tokens return HTTP `400`). Bulk batches require `1..100` pairs and are
+    validated atomically before any cache or DB writes (`0` partial writes). Request bodies
+    exceeding `DATA_UPLOAD_MAX_MEMORY_SIZE` (`2.5 MiB` default) return JSON HTTP `413`.
+    `/judge` and `/judge/bulk` enforce a sliding-window rate limit (default `5` requests per `1.0s`
+    per `client_ip`, honoring `X-Forwarded-For` right-to-left only when `TRUST_PROXY_HEADERS=true`
+    and `REMOTE_ADDR` matches `TRUSTED_PROXY_IPS`). Validation/parse `400` and `413` responses on
+    `/judge*` consume rate-limit quota; `/health` and `/playground` are not rate-limited.
+    Example response scores below are illustrative sample outputs for those specific pairs under the
+    default model and threshold (`v2:min`) — not guaranteed scores across all paraphrases.
 servers:
   - url: http://localhost:8000
     description: Local Django / Docker Compose server
@@ -25,6 +44,18 @@ paths:
               example:
                 status: "ok"
 
+  /playground:
+    get:
+      operationId: playgroundUi
+      summary: Dependency-free developer HTML playground calling POST /judge
+      responses:
+        "200":
+          description: HTML developer UI page (not rate-limited, no DB/audit side effects)
+          content:
+            text/html:
+              schema:
+                type: string
+
   /judge:
     post:
       operationId: judgeSingle
@@ -42,7 +73,11 @@ paths:
               sentence2: "猫が好きです。"
       responses:
         "200":
-          description: Entailment classification and confidence score
+          description: >
+            Entailment classification and score in [0.0, 1.0]. Example score (`0.9210`, serialized
+            as JSON number `0.921`) is an illustrative sample output observed for the shown input
+            pair under `exact_plus_nli:v2:min` (`MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli`,
+            `ENTAIL_THRESHOLD=0.50`) and varies across inputs, models, and revisions.
           headers:
             X-RateLimit-Limit:
               $ref: "#/components/headers/X-RateLimit-Limit"
@@ -54,11 +89,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/JudgeResponse"
-              example:
-                label: "ENTAIL"
-                score: 0.92
+              examples:
+                illustrativeEntail:
+                  summary: Illustrative ENTAIL sample output under v2:min (scores vary by input pair)
+                  value:
+                    label: "ENTAIL"
+                    score: 0.9210
         "400":
           $ref: "#/components/responses/ValidationError"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
         "429":
           $ref: "#/components/responses/RateLimitExceeded"
 
@@ -96,7 +136,11 @@ paths:
                       sentence2: "猫が好きです。"
       responses:
         "200":
-          description: Ordered list of entailment judgments matching input order
+          description: >
+            Ordered list of entailment judgments matching input order. Example scores (`0.9210` and
+            `0.0560`, serialized as JSON numbers `0.921` and `0.056`) are illustrative sample
+            outputs observed for `arrayPayload` under `exact_plus_nli:v2:min`
+            (`ENTAIL_THRESHOLD=0.50`) and vary across inputs, models, and revisions.
           headers:
             X-RateLimit-Limit:
               $ref: "#/components/headers/X-RateLimit-Limit"
@@ -110,13 +154,18 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/JudgeResponse"
-              example:
-                - label: "ENTAIL"
-                  score: 0.92
-                - label: "NO_ENTAIL"
-                  score: 0.06
+              examples:
+                illustrativeBatch:
+                  summary: Illustrative batch output for arrayPayload under v2:min (scores vary by input pair)
+                  value:
+                    - label: "ENTAIL"
+                      score: 0.9210
+                    - label: "NO_ENTAIL"
+                      score: 0.0560
         "400":
           $ref: "#/components/responses/BulkValidationError"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
         "429":
           $ref: "#/components/responses/RateLimitExceeded"
 
@@ -155,7 +204,10 @@ components:
 
   responses:
     ValidationError:
-      description: Validation error (blank text, max_length=2000 exceeded, or cross-language pair).
+      description: >
+        Validation or JSON parse error (non-string scalar, missing substantive Unicode
+        letter/number/symbol content, maxLength=2000 exceeded, >256 combined NLI tokens in either
+        direction, cross-language pair, or malformed JSON). Consumes rate-limit quota.
       headers:
         X-RateLimit-Limit:
           $ref: "#/components/headers/X-RateLimit-Limit"
@@ -166,12 +218,30 @@ components:
       content:
         application/json:
           schema:
-            $ref: "#/components/schemas/ValidationErrorObject"
-          example:
-            non_field_errors:
-              - "sentence1 and sentence2 must be written in the same language."
+            oneOf:
+              - $ref: "#/components/schemas/ValidationErrorObject"
+              - $ref: "#/components/schemas/ErrorMessage"
+              - $ref: "#/components/schemas/DetailError"
+          examples:
+            crossLanguage:
+              summary: Cross-language pair validation error
+              value:
+                non_field_errors:
+                  - "sentence1 and sentence2 must be written in the same language."
+            tokenLimitExceeded:
+              summary: Directional pair exceeds 256 combined NLI tokens
+              value:
+                error: "Sentence pair exceeds maximum NLI sequence length of 256 tokens (got 257 tokens)."
+            parseError:
+              summary: Malformed JSON request body
+              value:
+                detail: "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"
     BulkValidationError:
-      description: Invalid payload, batch size outside 1..100, or item validation error.
+      description: >
+        Invalid JSON/payload, batch size outside 1..100, item validation error (strict string,
+        substantive content, maxLength=2000, cross-language), or >256 combined NLI tokens on any
+        pair. Validated atomically before cache/DB writes (0 partial writes). Consumes rate-limit
+        quota.
       headers:
         X-RateLimit-Limit:
           $ref: "#/components/headers/X-RateLimit-Limit"
@@ -185,6 +255,7 @@ components:
             oneOf:
               - $ref: "#/components/schemas/ErrorMessage"
               - $ref: "#/components/schemas/ValidationErrorObject"
+              - $ref: "#/components/schemas/DetailError"
               - type: array
                 items:
                   $ref: "#/components/schemas/ValidationErrorObject"
@@ -193,12 +264,39 @@ components:
               summary: Empty or >100 raw list
               value:
                 error: "Bulk request must contain between 1 and 100 sentence pairs."
+            wrapperEmptyPairs:
+              summary: Empty wrapped pairs list
+              value:
+                pairs:
+                  non_field_errors:
+                    - "Ensure this field has at least 1 elements."
+            tokenLimitExceeded:
+              summary: Batch contains pair exceeding 256 combined NLI tokens (zero partial writes)
+              value:
+                error: "Batch contains a sentence pair exceeding maximum NLI sequence length of 256 tokens (max 257 tokens)."
             itemErrors:
               summary: Per-item validation errors for raw list
               value:
                 - non_field_errors:
                     - "sentence1 and sentence2 must be written in the same language."
                 - {}
+    PayloadTooLarge:
+      description: >
+        Request body exceeds DATA_UPLOAD_MAX_MEMORY_SIZE (default 2,621,440 bytes / 2.5 MiB).
+        Consumes rate-limit quota and is recorded in RequestAuditLog.
+      headers:
+        X-RateLimit-Limit:
+          $ref: "#/components/headers/X-RateLimit-Limit"
+        X-RateLimit-Remaining:
+          $ref: "#/components/headers/X-RateLimit-Remaining"
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorMessage"
+          example:
+            error: "Request body exceeds maximum allowed size (2.5 MiB)."
     RateLimitExceeded:
       description: Rate limit exceeded (max 5 requests per 1s per client_ip).
       headers:
@@ -237,12 +335,20 @@ components:
           type: string
           minLength: 1
           maxLength: 2000
-          description: First sentence (whitespace-trimmed, non-blank, same language family as sentence2).
+          description: >
+            First sentence (strict JSON string; non-string scalars rejected; whitespace-trimmed,
+            substantive letter/number/symbol content required after NFKC normalization, <= 2000
+            chars, same language family as sentence2, and <= 256 combined NLI tokens with sentence2
+            in both directions).
         sentence2:
           type: string
           minLength: 1
           maxLength: 2000
-          description: Second sentence (whitespace-trimmed, non-blank, same language family as sentence1).
+          description: >
+            Second sentence (strict JSON string; non-string scalars rejected; whitespace-trimmed,
+            substantive letter/number/symbol content required after NFKC normalization, <= 2000
+            chars, same language family as sentence1, and <= 256 combined NLI tokens with sentence1
+            in both directions).
     BulkJudgeRequest:
       type: object
       required: [pairs]
@@ -260,16 +366,28 @@ components:
         label:
           type: string
           enum: [ENTAIL, NO_ENTAIL]
+          description: Classification decision (`ENTAIL` iff unrounded `raw_score >= ENTAIL_THRESHOLD`, default `0.50`).
         score:
           type: number
           format: float
           minimum: 0.0
           maximum: 1.0
+          description: >
+            Normalized confidence score in [0.0, 1.0] rounded to 4 decimal places
+            (`0.99` for Tier 1 exact normalized match; `0.0` for non-identical offline fallback;
+            `round(clamp(min(p_E(s1->s2), p_E(s2->s1)), 0.0, 1.0), 4)` otherwise).
+            Varies by input pair, model, and revision.
     ErrorMessage:
       type: object
       required: [error]
       properties:
         error:
+          type: string
+    DetailError:
+      type: object
+      required: [detail]
+      properties:
+        detail:
           type: string
     RateLimitError:
       type: object
@@ -283,8 +401,10 @@ components:
     ValidationErrorObject:
       type: object
       additionalProperties:
-        type: array
-        items:
-          oneOf:
-            - type: string
-            - $ref: "#/components/schemas/ValidationErrorObject"
+        oneOf:
+          - type: array
+            items:
+              oneOf:
+                - type: string
+                - $ref: "#/components/schemas/ValidationErrorObject"
+          - $ref: "#/components/schemas/ValidationErrorObject"
