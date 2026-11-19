@@ -33,7 +33,7 @@ from assignment.services.normalizer import (
     evaluate_tier1,
     normalize_sentence,
 )
-from assignment.types import EntailmentLabel, ScoringMode
+from assignment.types import EntailmentLabel
 
 AblationMode = Literal["exact_plus_nli", "nli_only"]
 
@@ -51,7 +51,6 @@ DATASET_PATHS: dict[str, Path] = {
     "holdout": DEFAULT_HOLDOUT_PATH,
     "final_holdout": DEFAULT_FINAL_HOLDOUT_PATH,
 }
-SCORING_MODES: tuple[ScoringMode, ...] = ("mean", "min")
 ABLATION_MODES: tuple[AblationMode, ...] = ("exact_plus_nli", "nli_only")
 
 
@@ -365,7 +364,6 @@ def _neutral_tier1_result(s1: str, s2: str, reason: str) -> Tier1Result:
 
 def _run_tier2_mode_with_diagnostics(
     items: list[dict[str, Any]],
-    scoring_mode: ScoringMode = "mean",
     engine: HuggingFaceNLIEngine | None = None,
 ) -> tuple[list[tuple[EntailmentLabel, float]], list[float], float, list[_PairDiagnostic]]:
     """Evaluate all pairs using raw Tier 2 NLI cross-encoder and collect pair diagnostics."""
@@ -374,21 +372,13 @@ def _run_tier2_mode_with_diagnostics(
     neutral_t1 = [_neutral_tier1_result(s1, s2, "tier2_only") for s1, s2 in pairs]
 
     batch_start = time.perf_counter()
-    batch_details = active_engine.score_pairs_batch(
-        pairs,
-        neutral_t1,
-        scoring_mode=scoring_mode,
-    )
+    batch_details = active_engine.score_pairs_batch(pairs, neutral_t1)
     total_ms = (time.perf_counter() - batch_start) * 1000.0
 
     latencies_ms: list[float] = []
     for pair, t1 in zip(pairs, neutral_t1, strict=True):
         t0 = time.perf_counter()
-        active_engine.score_pairs_batch(
-            [pair],
-            [t1],
-            scoring_mode=scoring_mode,
-        )
+        active_engine.score_pairs_batch([pair], [t1])
         latencies_ms.append((time.perf_counter() - t0) * 1000.0)
 
     predictions = [(detail.label, float(detail.score)) for detail in batch_details]
@@ -405,13 +395,10 @@ def _run_tier2_mode_with_diagnostics(
 
 def _run_tier2_mode(
     items: list[dict[str, Any]],
-    scoring_mode: ScoringMode = "mean",
     engine: HuggingFaceNLIEngine | None = None,
 ) -> tuple[list[tuple[EntailmentLabel, float]], list[float], float]:
     """Evaluate all pairs using raw Tier 2 NLI cross-encoder without Tier 1 rules."""
-    preds, latencies_ms, total_ms, _ = _run_tier2_mode_with_diagnostics(
-        items, scoring_mode=scoring_mode, engine=engine
-    )
+    preds, latencies_ms, total_ms, _ = _run_tier2_mode_with_diagnostics(items, engine=engine)
     return preds, latencies_ms, total_ms
 
 
@@ -435,16 +422,13 @@ def _hybrid_fast_gate(
 
 def _run_hybrid_mode_with_diagnostics(
     items: list[dict[str, Any]],
-    scoring_mode: ScoringMode = "mean",
     ablation: AblationMode = "exact_plus_nli",
     engine: HuggingFaceNLIEngine | None = None,
 ) -> tuple[list[tuple[EntailmentLabel, float]], list[float], float, list[_PairDiagnostic]]:
     """Evaluate pairs under the selected offline ablation mode and collect diagnostics."""
     active_engine = engine if engine is not None else nli_engine
     if ablation == "nli_only":
-        return _run_tier2_mode_with_diagnostics(
-            items, scoring_mode=scoring_mode, engine=active_engine
-        )
+        return _run_tier2_mode_with_diagnostics(items, engine=active_engine)
 
     pairs = [(item["sentence1"], item["sentence2"]) for item in items]
 
@@ -464,11 +448,7 @@ def _run_hybrid_mode_with_diagnostics(
     if unresolved:
         nli_inputs = [(s1, s2) for _, s1, s2, _ in unresolved]
         t1_list = [t1_input for _, _, _, t1_input in unresolved]
-        nli_details = active_engine.score_pairs_batch(
-            nli_inputs,
-            t1_list,
-            scoring_mode=scoring_mode,
-        )
+        nli_details = active_engine.score_pairs_batch(nli_inputs, t1_list)
         for (idx, _s1, _s2, t1_input), detail in zip(unresolved, nli_details, strict=True):
             predictions[idx] = (detail.label, round(float(detail.score), 4))
             diagnostics[idx] = _PairDiagnostic(
@@ -483,11 +463,7 @@ def _run_hybrid_mode_with_diagnostics(
         t0 = time.perf_counter()
         pred, _diag, t1_input = _hybrid_fast_gate(s1, s2)
         if pred is None:
-            active_engine.score_pairs_batch(
-                [(s1, s2)],
-                [t1_input],
-                scoring_mode=scoring_mode,
-            )
+            active_engine.score_pairs_batch([(s1, s2)], [t1_input])
         latencies_ms.append((time.perf_counter() - t0) * 1000.0)
 
     resolved_preds: list[tuple[EntailmentLabel, float]] = []
@@ -502,13 +478,12 @@ def _run_hybrid_mode_with_diagnostics(
 
 def _run_hybrid_mode(
     items: list[dict[str, Any]],
-    scoring_mode: ScoringMode = "mean",
     ablation: AblationMode = "exact_plus_nli",
     engine: HuggingFaceNLIEngine | None = None,
 ) -> tuple[list[tuple[EntailmentLabel, float]], list[float], float]:
     """Evaluate all pairs using Tier 1 exact-match fast-gate + Tier 2 batch pipeline."""
     preds, latencies_ms, total_ms, _ = _run_hybrid_mode_with_diagnostics(
-        items, scoring_mode=scoring_mode, ablation=ablation, engine=engine
+        items, ablation=ablation, engine=engine
     )
     return preds, latencies_ms, total_ms
 
@@ -684,7 +659,6 @@ def _get_hardware_info() -> dict[str, Any]:
 def _build_provenance(
     dataset_name: str,
     fixture_path: Path,
-    scoring_mode: ScoringMode,
     model_name: str,
     threshold: float,
     as_json: bool,
@@ -700,7 +674,7 @@ def _build_provenance(
         cmd_parts.extend(["--fixture", fixture_rel])
     else:
         cmd_parts.extend(["--dataset", dataset_name])
-    cmd_parts.extend(["--scoring", scoring_mode, "--ablation", ablation])
+    cmd_parts.extend(["--ablation", ablation])
     if custom_model_name is not None:
         cmd_parts.extend(["--model-name", custom_model_name])
     if diagnostics:
@@ -708,11 +682,13 @@ def _build_provenance(
     if as_json:
         cmd_parts.append("--json")
 
+    scoring_rule = "min(p_entail_forward, p_entail_reverse)"
     return {
         "git_sha": _get_git_sha(),
         "dataset_name": dataset_name,
         "fixture_path": fixture_rel,
-        "scoring_mode": scoring_mode,
+        "scoring_policy": SCORING_POLICY_VERSION,
+        "scoring_rule": scoring_rule,
         "ablation": ablation,
         "model_name": model_name,
         "model_revision": _get_model_revision(model_name, engine=engine),
@@ -723,9 +699,9 @@ def _build_provenance(
             "entail_threshold": threshold,
             "entail_margin": None,
             "contradict_cap": None,
-            "scoring_mode": scoring_mode,
             "ablation": ablation,
             "scoring_policy": SCORING_POLICY_VERSION,
+            "scoring_rule": scoring_rule,
         },
         "command": shlex.join(cmd_parts),
     }
@@ -782,7 +758,7 @@ def _format_markdown_report(report: dict[str, Any]) -> str:
         ),
         (
             f"- **Model:** `{model['name']}` (revision=`{prov['model_revision']}`, "
-            f"threshold=`{model['threshold']}`, scoring=`{prov['scoring_mode']}`, "
+            f"threshold=`{model['threshold']}`, policy=`{prov['scoring_policy']}`, "
             f"ablation=`{prov.get('ablation', 'exact_plus_nli')}`)"
         ),
         (
@@ -894,12 +870,6 @@ class Command(BaseCommand):
             ),
         )
         parser.add_argument(
-            "--scoring",
-            choices=SCORING_MODES,
-            default="mean",
-            help="Bidirectional NLI scoring mode ('mean' or 'min').",
-        )
-        parser.add_argument(
             "--ablation",
             choices=ABLATION_MODES,
             default="exact_plus_nli",
@@ -924,7 +894,6 @@ class Command(BaseCommand):
     def handle(self, *args, **options) -> None:
         dataset_name, fixture_path = _resolve_fixture(options["dataset"], options["fixture"])
         items = _load_and_validate_fixture(fixture_path)
-        scoring_mode: ScoringMode = options["scoring"]
         ablation: AblationMode = options["ablation"]
         include_diagnostics = bool(options["diagnostics"])
         threshold = float(getattr(settings, "ENTAIL_THRESHOLD", 0.50))
@@ -958,17 +927,16 @@ class Command(BaseCommand):
 
         t1_preds, t1_lats, t1_total, t1_diags = _run_tier1_mode_with_diagnostics(items, threshold)
         t2_preds, t2_lats, t2_total, t2_diags = _run_tier2_mode_with_diagnostics(
-            items, scoring_mode=scoring_mode, engine=engine
+            items, engine=engine
         )
         hy_preds, hy_lats, hy_total, hy_diags = _run_hybrid_mode_with_diagnostics(
-            items, scoring_mode=scoring_mode, ablation=ablation, engine=engine
+            items, ablation=ablation, engine=engine
         )
 
         report = {
             "provenance": _build_provenance(
                 dataset_name=dataset_name,
                 fixture_path=fixture_path,
-                scoring_mode=scoring_mode,
                 model_name=model_name,
                 threshold=threshold,
                 as_json=bool(options["json"]),

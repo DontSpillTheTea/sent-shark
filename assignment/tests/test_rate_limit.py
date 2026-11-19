@@ -18,7 +18,7 @@ class TestRateLimit:
         monkeypatch.setattr(
             nli_mod.nli_engine,
             "score_pairs_batch",
-            lambda pairs, tier1_results=None, scoring_mode="mean": [
+            lambda pairs, tier1_results=None: [
                 nli_mod.NLIScoreDetail(
                     score=0.92,
                     label="ENTAIL",

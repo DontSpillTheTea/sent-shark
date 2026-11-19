@@ -223,22 +223,9 @@ def test_run_tier2_mode_scores_raw_normalized_inputs_without_rewrites(monkeypatc
     calls: list[dict[str, object]] = []
     original_fn = nli_mod.nli_engine.score_pairs_batch
 
-    def recording_score(
-        pairs,
-        tier1_results=None,
-        scoring_mode="mean",
-    ):
-        calls.append(
-            {
-                "count": len(pairs),
-                "scoring_mode": scoring_mode,
-            }
-        )
-        return original_fn(
-            pairs,
-            tier1_results,
-            scoring_mode=scoring_mode,
-        )
+    def recording_score(pairs, tier1_results=None):
+        calls.append({"count": len(pairs), "has_tier1": tier1_results is not None})
+        return original_fn(pairs, tier1_results)
 
     monkeypatch.setattr(nli_mod.nli_engine, "score_pairs_batch", recording_score)
 
@@ -257,7 +244,7 @@ def test_run_tier2_mode_scores_raw_normalized_inputs_without_rewrites(monkeypatc
     assert len(preds) == 1
     assert len(latencies) == 1
     assert len(calls) == 2
-    assert all(call["scoring_mode"] == "mean" for call in calls)
+    assert all(call["has_tier1"] for call in calls)
     # Without dev-overfit surface rewrites, raw MiniLM scores G21 as NO_ENTAIL
     assert preds[0][0] == "NO_ENTAIL"
 
@@ -396,26 +383,115 @@ def test_holdout_fixture_and_provenance_are_valid_and_disjoint_from_dev():
     assert isinstance(pawsx["citation"], str) and pawsx["citation"].strip()
 
 
+def test_run_eval_rejects_scoring_flag_and_records_v2_min_provenance(tmp_path, monkeypatch):
+    from assignment.management.commands import run_eval as run_eval_cmd
+    from assignment.services import nli_engine as nli_mod
+
+    fixture = tmp_path / "unit_eval.json"
+    fixture.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "U1",
+                    "language": "en",
+                    "stratum": "paraphrase",
+                    "source": "unit",
+                    "source_id": "1",
+                    "sentence1": "A cat sleeps.",
+                    "sentence2": "A feline naps.",
+                    "expected_label": "ENTAIL",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CommandError):
+        call_command("run_eval", "--fixture", str(fixture), "--scoring", "min")
+
+    class StubEngine:
+        def __init__(self, model_name=None):
+            self.model_name = model_name
+
+        def warm_up(self):
+            return True
+
+        def get_model_revision(self):
+            return "stub-rev-v2"
+
+        def score_pairs_batch(self, pairs, tier1_results=None):
+            return [
+                nli_mod.NLIScoreDetail(
+                    score=0.85,
+                    label="ENTAIL",
+                    tier_used="tier2_nli",
+                    forward_entail=0.90,
+                    reverse_entail=0.85,
+                    max_contradiction=0.05,
+                    forward_contradict=0.05,
+                    reverse_contradict=0.02,
+                )
+                for _ in pairs
+            ]
+
+    monkeypatch.setattr(run_eval_cmd, "HuggingFaceNLIEngine", StubEngine)
+    out_json = StringIO()
+    call_command(
+        "run_eval",
+        "--fixture",
+        str(fixture),
+        "--model-name",
+        "stub/v2-min-nli",
+        "--json",
+        stdout=out_json,
+    )
+    report = json.loads(out_json.getvalue())
+    prov = report["provenance"]
+    assert "scoring_mode" not in prov
+    assert prov["scoring_policy"] == "exact_plus_nli:v2:min"
+    assert prov["scoring_rule"] == "min(p_entail_forward, p_entail_reverse)"
+    assert "--scoring" not in prov["command"]
+    inf_cfg = prov["inference_config"]
+    assert "scoring_mode" not in inf_cfg
+    assert inf_cfg["scoring_policy"] == "exact_plus_nli:v2:min"
+    assert inf_cfg["scoring_rule"] == "min(p_entail_forward, p_entail_reverse)"
+
+    out_md = StringIO()
+    call_command(
+        "run_eval",
+        "--fixture",
+        str(fixture),
+        "--model-name",
+        "stub/v2-min-nli",
+        stdout=out_md,
+    )
+    md = out_md.getvalue()
+    assert "policy=`exact_plus_nli:v2:min`" in md
+    assert "scoring=" not in md
+
+
 @pytest.mark.integration
 @pytest.mark.django_db
-def test_run_eval_supports_scoring_modes_and_provenance_metadata():
+def test_run_eval_supports_v2_min_provenance_and_datasets():
     assert JudgmentRecord.objects.count() == 0
     assert RequestAuditLog.objects.count() == 0
 
-    out_dev_min = StringIO()
-    call_command("run_eval", "--dataset", "dev", "--scoring", "min", "--json", stdout=out_dev_min)
-    dev_min_report = json.loads(out_dev_min.getvalue())
+    out_dev = StringIO()
+    call_command("run_eval", "--dataset", "dev", "--json", stdout=out_dev)
+    dev_report = json.loads(out_dev.getvalue())
 
     assert JudgmentRecord.objects.count() == 0
     assert RequestAuditLog.objects.count() == 0
 
-    dev_prov = dev_min_report["provenance"]
+    dev_prov = dev_report["provenance"]
     assert dev_prov["dataset_name"] == "dev"
-    assert dev_prov["scoring_mode"] == "min"
+    assert "scoring_mode" not in dev_prov
+    assert dev_prov["scoring_policy"] == "exact_plus_nli:v2:min"
+    assert dev_prov["scoring_rule"] == "min(p_entail_forward, p_entail_reverse)"
     assert dev_prov["model_name"] == settings.NLI_MODEL_NAME
     assert isinstance(dev_prov["model_revision"], str) and dev_prov["model_revision"]
     assert isinstance(dev_prov["git_sha"], str) and dev_prov["git_sha"]
-    assert isinstance(dev_prov["command"], str) and "--scoring min" in dev_prov["command"]
+    assert isinstance(dev_prov["command"], str) and "--scoring" not in dev_prov["command"]
     assert dev_prov["fixture_path"].endswith("eval_gauntlet.json")
 
     hardware = dev_prov["hardware"]
@@ -428,14 +504,15 @@ def test_run_eval_supports_scoring_modes_and_provenance_metadata():
     assert inf_cfg["entail_threshold"] == settings.ENTAIL_THRESHOLD
     assert "entail_margin" in inf_cfg
     assert "contradict_cap" in inf_cfg
-    assert inf_cfg["scoring_mode"] == "min"
+    assert "scoring_mode" not in inf_cfg
     assert inf_cfg["ablation"] == "exact_plus_nli"
-    assert inf_cfg["scoring_policy"] == "exact_plus_nli:v1:mean"
+    assert inf_cfg["scoring_policy"] == "exact_plus_nli:v2:min"
+    assert inf_cfg["scoring_rule"] == "min(p_entail_forward, p_entail_reverse)"
 
-    assert "by_source" in dev_min_report["dataset"]
-    assert "by_stratum" in dev_min_report["dataset"]
+    assert "by_source" in dev_report["dataset"]
+    assert "by_stratum" in dev_report["dataset"]
     for mode_name in ("tier1", "tier2", "hybrid"):
-        mode_metrics = dev_min_report["modes"][mode_name]
+        mode_metrics = dev_report["modes"][mode_name]
         for key in (
             "by_language",
             "by_source",
@@ -454,12 +531,15 @@ def test_run_eval_supports_scoring_modes_and_provenance_metadata():
 
     hold_prov = holdout_report["provenance"]
     assert hold_prov["dataset_name"] == "holdout"
-    assert hold_prov["scoring_mode"] == "mean"
+    assert "scoring_mode" not in hold_prov
+    assert hold_prov["scoring_policy"] == "exact_plus_nli:v2:min"
+    assert hold_prov["scoring_rule"] == "min(p_entail_forward, p_entail_reverse)"
     assert hold_prov["model_name"] == settings.NLI_MODEL_NAME
     assert isinstance(hold_prov["model_revision"], str) and hold_prov["model_revision"]
     assert isinstance(hold_prov["git_sha"], str) and hold_prov["git_sha"]
     assert hold_prov["fixture_path"].endswith("eval_holdout.json")
-    assert hold_prov["inference_config"]["scoring_mode"] == "mean"
+    assert "scoring_mode" not in hold_prov["inference_config"]
+    assert hold_prov["inference_config"]["scoring_policy"] == "exact_plus_nli:v2:min"
     assert "--dataset holdout" in hold_prov["command"]
 
     hold_ds = holdout_report["dataset"]
@@ -753,17 +833,11 @@ def test_run_eval_supports_ablation_and_misclassification_diagnostics(tmp_path, 
         def get_model_revision(self):
             return "fake-rev-123"
 
-        def score_pairs_batch(
-            self,
-            pairs,
-            tier1_results=None,
-            scoring_mode="mean",
-        ):
+        def score_pairs_batch(self, pairs, tier1_results=None):
             recorded_kwargs.append(
                 {
                     "count": len(pairs),
                     "has_tier1": tier1_results is not None,
-                    "scoring_mode": scoring_mode,
                 }
             )
             return [
@@ -788,8 +862,6 @@ def test_run_eval_supports_ablation_and_misclassification_diagnostics(tmp_path, 
         str(fixture),
         "--model-name",
         "fake/scoped-nli",
-        "--scoring",
-        "min",
         "--ablation",
         "nli_only",
         "--diagnostics",
@@ -801,7 +873,7 @@ def test_run_eval_supports_ablation_and_misclassification_diagnostics(tmp_path, 
     assert rep_scoped["provenance"]["model_revision"] == "fake-rev-123"
     assert rep_scoped["model"]["name"] == "fake/scoped-nli"
     assert recorded_kwargs
-    assert all(call["has_tier1"] and call["scoring_mode"] == "min" for call in recorded_kwargs)
+    assert all(call["has_tier1"] for call in recorded_kwargs)
     assert nli_mod.nli_engine.model_name == singleton_before
 
     class FailingEngine(FakeScopedEngine):

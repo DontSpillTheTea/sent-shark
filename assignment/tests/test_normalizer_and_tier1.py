@@ -111,16 +111,16 @@ def test_nli_batch_deduplicates_identical_and_swapped_directional_pairs(monkeypa
     assert details[0].reverse_entail == details[1].forward_entail
 
 
-def test_nli_scoring_mode_validation_and_min_vs_mean(monkeypatch):
+def test_nli_pure_min_scoring_and_unrounded_threshold_boundary(monkeypatch):
     from types import SimpleNamespace
 
     import torch
 
     from assignment.services.nli_engine import HuggingFaceNLIEngine
 
-    engine = HuggingFaceNLIEngine("mock/min-vs-mean")
-    with pytest.raises(ValueError, match="Unsupported scoring_mode"):
-        engine.score_pairs_batch([("A", "B")], scoring_mode="max")  # type: ignore[arg-type]
+    engine = HuggingFaceNLIEngine("mock/pure-min")
+    with pytest.raises(TypeError):
+        engine.score_pairs_batch([("A", "B")], scoring_mode="min")  # type: ignore[call-arg]
 
     monkeypatch.setattr(engine, "_ensure_loaded", lambda: True)
     engine._entail_idx = 0
@@ -129,15 +129,157 @@ def test_nli_scoring_mode_validation_and_min_vs_mean(monkeypatch):
         "input_ids": torch.zeros((len(premises), 2), dtype=torch.long)
     }
 
-    # First sequence (A->B): ~0.95 entail; second sequence (B->A): ~0.20 entail
-    probs = torch.tensor([[0.95, 0.04, 0.01], [0.20, 0.78, 0.02]], dtype=torch.float32)
-    monkeypatch.setattr(engine, "_model", lambda **_enc: SimpleNamespace(logits=torch.log(probs)))
+    def run_mock_pair(fwd_probs: list[float], rev_probs: list[float]):
+        probs = torch.tensor([fwd_probs, rev_probs], dtype=torch.float32)
+        monkeypatch.setattr(
+            engine, "_model", lambda **_enc: SimpleNamespace(logits=torch.log(probs))
+        )
+        return engine.score_pairs_batch([("Alpha", "Beta")])[0]
 
-    mean_res = engine.score_pairs_batch([("Alpha", "Beta")], scoring_mode="mean")[0]
-    min_res = engine.score_pairs_batch([("Alpha", "Beta")], scoring_mode="min")[0]
-    assert mean_res.label == "ENTAIL"
-    assert min_res.label == "NO_ENTAIL"
-    assert min_res.score < mean_res.score
+    # Asymmetric directional entailment uses pure min -> NO_ENTAIL
+    asym = run_mock_pair([0.95, 0.04, 0.01], [0.20, 0.78, 0.02])
+    assert asym.score == 0.2
+    assert asym.label == "NO_ENTAIL"
+
+    # Strong one-way entailment (0.99 / 0.01) -> 0.01 NO_ENTAIL
+    oneway = run_mock_pair([0.99, 0.005, 0.005], [0.01, 0.98, 0.01])
+    assert oneway.score == 0.01
+    assert oneway.label == "NO_ENTAIL"
+
+    # Moderate contradiction (0.35) does NOT apply (1 - p_contra_max) penalty, but is still recorded
+    moderate_contra = run_mock_pair([0.64, 0.01, 0.35], [0.62, 0.03, 0.35])
+    assert moderate_contra.score == 0.62
+    assert moderate_contra.label == "ENTAIL"
+    assert moderate_contra.max_contradiction == 0.35
+
+    # Unrounded threshold check MUST happen before 4-decimal rounding
+    below_thresh = run_mock_pair([0.80, 0.19, 0.01], [0.49996, 0.49004, 0.01])
+    assert below_thresh.label == "NO_ENTAIL"
+    assert below_thresh.score == 0.5
+
+    at_or_above_thresh = run_mock_pair([0.80, 0.19, 0.01], [0.50004, 0.48996, 0.01])
+    assert at_or_above_thresh.label == "ENTAIL"
+    assert at_or_above_thresh.score == 0.5
+
+
+def test_nli_score_pairs_batch_raises_token_limit_exceeded_without_truncation(monkeypatch):
+    import torch
+
+    from assignment.services.nli_engine import (
+        NLI_MAX_LENGTH,
+        HuggingFaceNLIEngine,
+        TokenLimitExceededError,
+    )
+
+    engine = HuggingFaceNLIEngine("mock/token-limit")
+    monkeypatch.setattr(engine, "_ensure_loaded", lambda: True)
+    engine._entail_idx = 0
+    engine._contradict_idx = 2
+
+    captured_kwargs: dict[str, object] = {}
+
+    def overlong_tokenizer(premises, hypotheses, **kwargs):
+        captured_kwargs.update(kwargs)
+        return {"input_ids": torch.zeros((len(premises), NLI_MAX_LENGTH + 1), dtype=torch.long)}
+
+    model_called = False
+
+    def fail_if_model_called(**_enc):
+        nonlocal model_called
+        model_called = True
+        raise AssertionError("_model must not run when token limit is exceeded")
+
+    engine._tokenizer = overlong_tokenizer
+    monkeypatch.setattr(engine, "_model", fail_if_model_called)
+
+    with pytest.raises(TokenLimitExceededError):
+        engine.score_pairs_batch([("Alpha", "Beta")])
+
+    assert captured_kwargs.get("truncation") is False
+    assert "max_length" not in captured_kwargs
+    assert model_called is False
+
+
+def test_nli_ensure_loaded_reuses_matching_tokenizer_and_offline_unrounded_threshold(monkeypatch):
+    from types import SimpleNamespace
+
+    import transformers
+
+    from assignment.services.judge_service import evaluate_uncached_pairs
+    from assignment.services.nli_engine import HuggingFaceNLIEngine
+    from assignment.services.normalizer import Tier1Result
+
+    with pytest.raises(TypeError):
+        evaluate_uncached_pairs([("A", "B")], scoring_mode="min")  # type: ignore[call-arg]
+
+    # Offline fallback compares unrounded fallback_score against threshold before 4-dp rounding
+    offline_engine = HuggingFaceNLIEngine("mock/offline")
+    monkeypatch.setattr(offline_engine, "_ensure_loaded", lambda: False)
+    t1_below = Tier1Result(
+        decisive=False,
+        label="NO_ENTAIL",
+        score=0.0,
+        reason="mock",
+        canonical_s1="alpha",
+        canonical_s2="beta",
+        fallback_score=0.49996,
+    )
+    t1_above = Tier1Result(
+        decisive=False,
+        label="NO_ENTAIL",
+        score=0.0,
+        reason="mock",
+        canonical_s1="alpha",
+        canonical_s2="beta",
+        fallback_score=0.50004,
+    )
+    res_below, res_above = offline_engine.score_pairs_batch(
+        [("alpha", "beta"), ("alpha", "beta")],
+        [t1_below, t1_above],
+    )
+    assert res_below.label == "NO_ENTAIL" and res_below.score == 0.5
+    assert res_above.label == "ENTAIL" and res_above.score == 0.5
+
+    # _ensure_loaded reuses pre-loaded _tokenizer when _tokenizer_model_name matches model_name
+    tokenizer_calls = {"count": 0}
+    preloaded_tokenizer = object()
+
+    def fake_from_pretrained(_name):
+        tokenizer_calls["count"] += 1
+        return object()
+
+    class FakeModel:
+        config = SimpleNamespace(
+            id2label={0: "entailment", 1: "neutral", 2: "contradiction"},
+            num_labels=3,
+            _commit_hash="rev-reuse-1",
+        )
+
+        def eval(self):
+            return self
+
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", fake_from_pretrained)
+    monkeypatch.setattr(
+        transformers.AutoModelForSequenceClassification,
+        "from_pretrained",
+        lambda _name: FakeModel(),
+    )
+
+    reuse_engine = HuggingFaceNLIEngine("mock/reuse-tok")
+    reuse_engine._tokenizer = preloaded_tokenizer
+    reuse_engine._tokenizer_model_name = "mock/reuse-tok"
+    assert reuse_engine._ensure_loaded() is True
+    assert tokenizer_calls["count"] == 0
+    assert reuse_engine._tokenizer is preloaded_tokenizer
+
+    # Mismatched _tokenizer_model_name triggers a fresh tokenizer load
+    mismatch_engine = HuggingFaceNLIEngine("mock/new-tok")
+    mismatch_engine._tokenizer = preloaded_tokenizer
+    mismatch_engine._tokenizer_model_name = "mock/old-tok"
+    assert mismatch_engine._ensure_loaded() is True
+    assert tokenizer_calls["count"] == 1
+    assert mismatch_engine._tokenizer is not preloaded_tokenizer
+    assert mismatch_engine._tokenizer_model_name == "mock/new-tok"
 
 
 def test_settings_optional_int_env_error_context(monkeypatch):

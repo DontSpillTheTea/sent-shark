@@ -11,7 +11,7 @@ from assignment.models import JudgmentRecord, RequestAuditLog
 from assignment.rate_limit import rate_limiter
 
 
-def _stub_score_pairs_batch(pairs, tier1_results=None, scoring_mode="mean"):
+def _stub_score_pairs_batch(pairs, tier1_results=None):
     from assignment.services.nli_engine import NLIScoreDetail
 
     return [
@@ -121,12 +121,12 @@ class TestParallelJudgmentsAndDeduplication:
         count_lock = threading.Lock()
         original_fn = nli_mod.nli_engine.score_pairs_batch
 
-        def wrapped_score(pairs, t1_results, scoring_mode="mean"):
+        def wrapped_score(pairs, t1_results):
             nonlocal call_count
             with count_lock:
                 call_count += len(pairs)
             time.sleep(0.05)  # hold in-flight window so all 30 threads overlap
-            return original_fn(pairs, t1_results, scoring_mode=scoring_mode)
+            return original_fn(pairs, t1_results)
 
         monkeypatch.setattr(nli_mod.nli_engine, "score_pairs_batch", wrapped_score)
 
@@ -184,12 +184,12 @@ class TestParallelJudgmentsAndDeduplication:
         count_lock = threading.Lock()
         original_fn = nli_mod.nli_engine.score_pairs_batch
 
-        def wrapped_score(pairs, t1_results, scoring_mode="mean"):
+        def wrapped_score(pairs, t1_results):
             nonlocal call_count
             with count_lock:
                 call_count += len(pairs)
             time.sleep(0.05)
-            return original_fn(pairs, t1_results, scoring_mode=scoring_mode)
+            return original_fn(pairs, t1_results)
 
         monkeypatch.setattr(nli_mod.nli_engine, "score_pairs_batch", wrapped_score)
 
@@ -221,7 +221,7 @@ class TestParallelJudgmentsAndDeduplication:
 
         original_fn = nli_mod.nli_engine.score_pairs_batch
 
-        def failing_score(pairs, t1_results, scoring_mode="mean"):
+        def failing_score(pairs, t1_results):
             time.sleep(0.05)
             raise RuntimeError("simulated NLI failure")
 

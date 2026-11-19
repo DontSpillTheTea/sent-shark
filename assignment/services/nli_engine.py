@@ -14,7 +14,7 @@ from pathlib import Path
 from django.conf import settings
 
 from assignment.services.normalizer import Tier1Result, evaluate_tier1, normalize_sentence
-from assignment.types import EntailmentLabel, ScoringMode, TierName
+from assignment.types import EntailmentLabel, TierName
 
 logger = logging.getLogger(__name__)
 
@@ -25,21 +25,8 @@ _NEGATED_ENTAIL_RE = re.compile(r"(?:^|[^a-z])(?:non|not|no)[\s_-]*entail")
 _NEGATED_CONTRADICT_RE = re.compile(r"(?:^|[^a-z])(?:non|not|no)[\s_-]*contradict")
 
 
-def _validate_scoring_mode(scoring_mode: ScoringMode) -> None:
-    if scoring_mode not in ("mean", "min"):
-        raise ValueError(f"Unsupported scoring_mode: {scoring_mode!r}")
-
-
-def _aggregate_entailment(
-    p_entail_fwd: float,
-    p_entail_rev: float,
-    scoring_mode: ScoringMode,
-) -> float:
-    """Aggregate bidirectional entailment probabilities via mean or min."""
-    _validate_scoring_mode(scoring_mode)
-    if scoring_mode == "min":
-        return min(p_entail_fwd, p_entail_rev)
-    return 0.5 * (p_entail_fwd + p_entail_rev)
+class TokenLimitExceededError(ValueError):
+    """Raised when a directional premise-hypothesis sequence exceeds NLI_MAX_LENGTH tokens."""
 
 
 def _resolve_hf_model_revision(model_name: str, model_config=None) -> str | None:
@@ -85,6 +72,7 @@ class HuggingFaceNLIEngine:
         )
         self._lock = threading.Lock()
         self._tokenizer = None
+        self._tokenizer_model_name: str | None = None
         self._model = None
         self._entail_idx: int | None = None
         self._contradict_idx: int | None = None
@@ -229,7 +217,13 @@ class HuggingFaceNLIEngine:
                 torch.set_num_threads(max(1, min(4, os.cpu_count() or 2)))
 
                 logger.info("Loading HuggingFace NLI model: %s", self.model_name)
-                tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+                if (
+                    self._tokenizer is not None
+                    and getattr(self, "_tokenizer_model_name", None) == self.model_name
+                ):
+                    tokenizer = self._tokenizer
+                else:
+                    tokenizer = AutoTokenizer.from_pretrained(self.model_name)
                 model = AutoModelForSequenceClassification.from_pretrained(self.model_name)
                 model.eval()
 
@@ -237,6 +231,7 @@ class HuggingFaceNLIEngine:
                 model_revision = _resolve_hf_model_revision(self.model_name, model.config)
 
                 self._tokenizer = tokenizer
+                self._tokenizer_model_name = self.model_name
                 self._model = model
                 self._entail_idx = entail_idx
                 self._contradict_idx = contradict_idx
@@ -269,14 +264,13 @@ class HuggingFaceNLIEngine:
         self,
         pairs: list[tuple[str, str]],
         tier1_results: list[Tier1Result] | None = None,
-        scoring_mode: ScoringMode = "mean",
     ) -> list[NLIScoreDetail]:
         """
-        Score a batch of sentence pairs using raw normalized bidirectional NLI inference.
-        Deduplicates identical directional (premise, hypothesis) pairs before tokenization,
-        and falls back cleanly to Tier 1 scores if the transformer model is unavailable.
+        Score a batch of sentence pairs using pure unrounded minimum bidirectional NLI
+        entailment probability (min(p_entail_fwd, p_entail_rev)). Deduplicates identical
+        directional (premise, hypothesis) pairs before tokenization, enforces NLI_MAX_LENGTH
+        without silent truncation, and falls back to Tier 1 scores when disabled/unavailable.
         """
-        _validate_scoring_mode(scoring_mode)
         if not pairs:
             return []
 
@@ -291,19 +285,25 @@ class HuggingFaceNLIEngine:
         threshold = float(getattr(settings, "ENTAIL_THRESHOLD", 0.50))
 
         if not self._ensure_loaded():
-            return [
-                NLIScoreDetail(
-                    score=round(t1.fallback_score, 4),
-                    label="ENTAIL" if t1.fallback_score >= threshold else "NO_ENTAIL",
-                    tier_used="tier1_rule",
-                    forward_entail=t1.fallback_score,
-                    reverse_entail=t1.fallback_score,
-                    max_contradiction=round(1.0 - t1.fallback_score, 4),
-                    forward_contradict=round(1.0 - t1.fallback_score, 4),
-                    reverse_contradict=round(1.0 - t1.fallback_score, 4),
+            fallback_details: list[NLIScoreDetail] = []
+            for t1 in resolved_t1:
+                raw_fallback = max(0.0, min(1.0, float(t1.fallback_score)))
+                fallback_label: EntailmentLabel = (
+                    "ENTAIL" if raw_fallback >= threshold else "NO_ENTAIL"
                 )
-                for t1 in resolved_t1
-            ]
+                fallback_details.append(
+                    NLIScoreDetail(
+                        score=round(raw_fallback, 4),
+                        label=fallback_label,
+                        tier_used="tier1_rule",
+                        forward_entail=raw_fallback,
+                        reverse_entail=raw_fallback,
+                        max_contradiction=round(1.0 - raw_fallback, 4),
+                        forward_contradict=round(1.0 - raw_fallback, 4),
+                        reverse_contradict=round(1.0 - raw_fallback, 4),
+                    )
+                )
+            return fallback_details
 
         import torch
 
@@ -336,10 +336,15 @@ class HuggingFaceNLIEngine:
                     [p for p, _ in chunk],
                     [h for _, h in chunk],
                     padding=True,
-                    truncation=True,
-                    max_length=NLI_MAX_LENGTH,
+                    truncation=False,
                     return_tensors="pt",
                 )
+                seq_len = int(encoded["input_ids"].shape[1])
+                if seq_len > NLI_MAX_LENGTH:
+                    raise TokenLimitExceededError(
+                        f"Sentence pair exceeds maximum NLI sequence length of "
+                        f"{NLI_MAX_LENGTH} tokens (got {seq_len} tokens)."
+                    )
                 logits = self._model(**encoded).logits
                 probs_all.extend(torch.softmax(logits, dim=-1).tolist())
 
@@ -352,10 +357,9 @@ class HuggingFaceNLIEngine:
             p_contra_fwd = float(fwd[self._contradict_idx])
             p_contra_rev = float(rev[self._contradict_idx])
             p_contra_max = max(p_contra_fwd, p_contra_rev)
-            entail_signal = _aggregate_entailment(p_entail_fwd, p_entail_rev, scoring_mode)
-            nli_score = entail_signal * (1.0 - p_contra_max)
-            score = round(max(0.0, min(1.0, nli_score)), 4)
-            label: EntailmentLabel = "ENTAIL" if score >= threshold else "NO_ENTAIL"
+            raw_score = max(0.0, min(1.0, min(p_entail_fwd, p_entail_rev)))
+            label: EntailmentLabel = "ENTAIL" if raw_score >= threshold else "NO_ENTAIL"
+            score = round(raw_score, 4)
 
             results.append(
                 NLIScoreDetail(

@@ -6,6 +6,7 @@ deduplicated persistence (safe under 30+ parallel writes).
 from __future__ import annotations
 
 import hashlib
+import math
 import threading
 from collections import OrderedDict
 from collections.abc import Callable
@@ -15,11 +16,13 @@ from django.conf import settings
 from django.db import connection, transaction
 
 from assignment.models import JudgmentRecord
-from assignment.services.nli_engine import _validate_scoring_mode, nli_engine
+from assignment.services import nli_engine as nli_mod
+from assignment.services.nli_engine import nli_engine
 from assignment.services.normalizer import Tier1Result, evaluate_tier1, normalize_sentence
-from assignment.types import EntailmentLabel, ScoringMode, TierName
+from assignment.types import EntailmentLabel, TierName
 
-SCORING_POLICY_VERSION = "exact_plus_nli:v1:mean"
+SCORING_POLICY_VERSION = "exact_plus_nli:v2:min"
+_UNSET = object()
 
 # Serialize writes when running on SQLite so 30 concurrent writer threads
 # never collide on SQLite's single-writer file lock. PostgreSQL handles
@@ -168,25 +171,135 @@ def reset_cache() -> None:
         _HOT_CACHE.clear()
 
 
-def compute_pair_hash(
-    sentence1: str,
-    sentence2: str,
+@dataclass(frozen=True)
+class _CacheIdentityConfig:
+    model_name: str
+    model_revision: str
+    model_enabled: bool
+    entail_index: int | None
+    contradict_index: int | None
+    policy_version: str
+    threshold_value: float
+    threshold_key: str
+
+
+def _canonical_threshold(value: float) -> tuple[float, str]:
+    """Validate and canonicalize ENTAIL_THRESHOLD so equivalent floats share a key."""
+    val = float(value)
+    if math.isnan(val) or math.isinf(val):
+        raise ValueError(f"ENTAIL_THRESHOLD must be a finite float, got {value!r}.")
+    if val == 0.0:
+        val = 0.0
+    return val, repr(val)
+
+
+def _resolve_model_revision_for_cache(resolved_model: str, model_enabled: bool) -> str:
+    """Resolve active model revision for cache identity without loading model weights."""
+    if not model_enabled:
+        return "disabled"
+    if resolved_model == nli_engine.model_name and nli_engine.model_revision:
+        return nli_engine.model_revision
+    return nli_mod._resolve_hf_model_revision(resolved_model) or "unknown"
+
+
+def _resolve_cache_config(
+    *,
     model_name: str | None = None,
     policy_version: str = SCORING_POLICY_VERSION,
-) -> tuple[str, str, str]:
-    """Compute canonical, order-independent, model- and policy-versioned SHA-256 pair hash."""
+    entail_threshold: float | None = None,
+    model_revision: str | None = None,
+    model_enabled: bool | None = None,
+    entail_index: int | None | object = _UNSET,
+    contradict_index: int | None | object = _UNSET,
+) -> _CacheIdentityConfig:
+    """Resolve all prediction-affecting settings for cache keying."""
     resolved_model = model_name or getattr(
         settings,
         "NLI_MODEL_NAME",
         "MoritzLaurer/multilingual-MiniLMv2-L6-mnli-xnli",
     )
+    resolved_enabled = (
+        bool(getattr(settings, "NLI_ENABLE_MODEL", True))
+        if model_enabled is None
+        else bool(model_enabled)
+    )
+    resolved_revision = (
+        model_revision
+        if model_revision is not None
+        else _resolve_model_revision_for_cache(resolved_model, resolved_enabled)
+    )
+    raw_threshold = (
+        getattr(settings, "ENTAIL_THRESHOLD", 0.50)
+        if entail_threshold is None
+        else entail_threshold
+    )
+    threshold_value, threshold_key = _canonical_threshold(raw_threshold)
+    resolved_entail_idx = (
+        getattr(settings, "NLI_ENTAIL_INDEX", None) if entail_index is _UNSET else entail_index
+    )
+    resolved_contradict_idx = (
+        getattr(settings, "NLI_CONTRADICT_INDEX", None)
+        if contradict_index is _UNSET
+        else contradict_index
+    )
+    return _CacheIdentityConfig(
+        model_name=resolved_model,
+        model_revision=resolved_revision,
+        model_enabled=resolved_enabled,
+        entail_index=resolved_entail_idx,  # type: ignore[arg-type]
+        contradict_index=resolved_contradict_idx,  # type: ignore[arg-type]
+        policy_version=policy_version,
+        threshold_value=threshold_value,
+        threshold_key=threshold_key,
+    )
+
+
+def _hash_normalized_pair(norm1: str, norm2: str, cfg: _CacheIdentityConfig) -> str:
+    a, b = sorted((norm1, norm2))
+    payload = "\0".join(
+        [
+            cfg.model_name,
+            cfg.model_revision,
+            "1" if cfg.model_enabled else "0",
+            str(cfg.entail_index),
+            str(cfg.contradict_index),
+            cfg.policy_version,
+            cfg.threshold_key,
+            a,
+            b,
+        ]
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def compute_pair_hash(
+    sentence1: str,
+    sentence2: str,
+    model_name: str | None = None,
+    policy_version: str = SCORING_POLICY_VERSION,
+    entail_threshold: float | None = None,
+    model_revision: str | None = None,
+    model_enabled: bool | None = None,
+    entail_index: int | None | object = _UNSET,
+    contradict_index: int | None | object = _UNSET,
+) -> tuple[str, str, str]:
+    """
+    Compute canonical, order-independent SHA-256 pair hash scoped by every setting
+    that affects predictions (model name/revision, enable flag, label index overrides,
+    scoring policy version, and entailment threshold).
+    """
+    cfg = _resolve_cache_config(
+        model_name=model_name,
+        policy_version=policy_version,
+        entail_threshold=entail_threshold,
+        model_revision=model_revision,
+        model_enabled=model_enabled,
+        entail_index=entail_index,
+        contradict_index=contradict_index,
+    )
     norm1 = normalize_sentence(sentence1)
     norm2 = normalize_sentence(sentence2)
-    a, b = sorted((norm1, norm2))
-    digest = hashlib.sha256(
-        f"{resolved_model}\0{policy_version}\0{a}\0{b}".encode("utf-8")
-    ).hexdigest()
-    return digest, norm1, norm2
+    return _hash_normalized_pair(norm1, norm2, cfg), norm1, norm2
 
 
 def _persist_records_safely(records_to_create: list[JudgmentRecord]) -> dict[str, JudgmentRecord]:
@@ -219,13 +332,11 @@ def judge_single(sentence1: str, sentence2: str) -> JudgmentOutput:
 
 def evaluate_uncached_pairs(
     pairs: list[tuple[str, str]],
-    scoring_mode: ScoringMode = "mean",
 ) -> list[JudgmentOutput]:
     """
     Pure Tier 1 exact-match gate + batched Tier 2 NLI evaluation without cache or DB side effects.
     Shared by both judge_bulk (after cache/singleflight filtering) and offline evaluation.
     """
-    _validate_scoring_mode(scoring_mode)
     if not pairs:
         return []
 
@@ -247,10 +358,7 @@ def evaluate_uncached_pairs(
     if unresolved_for_tier2:
         nli_inputs = [(s1, s2) for _, s1, s2, _ in unresolved_for_tier2]
         t1_list = [t1 for _, _, _, t1 in unresolved_for_tier2]
-        score_kwargs: dict[str, object] = {}
-        if scoring_mode != "mean":
-            score_kwargs["scoring_mode"] = scoring_mode
-        nli_details = nli_engine.score_pairs_batch(nli_inputs, t1_list, **score_kwargs)
+        nli_details = nli_engine.score_pairs_batch(nli_inputs, t1_list)
 
         for (idx, _s1, _s2, _), detail in zip(unresolved_for_tier2, nli_details, strict=True):
             outputs[idx] = JudgmentOutput(
@@ -303,11 +411,22 @@ def judge_bulk(pairs: list[tuple[str, str]]) -> list[JudgmentOutput]:
     if not pairs:
         return []
 
+    cache_cfg = _resolve_cache_config()
     hashed_items: list[tuple[str, str, str]] = []
     pair_by_hash: dict[str, tuple[str, str]] = {}
 
     for s1, s2 in pairs:
-        pair_hash, _, _ = compute_pair_hash(s1, s2)
+        pair_hash, _, _ = compute_pair_hash(
+            s1,
+            s2,
+            model_name=cache_cfg.model_name,
+            policy_version=cache_cfg.policy_version,
+            entail_threshold=cache_cfg.threshold_value,
+            model_revision=cache_cfg.model_revision,
+            model_enabled=cache_cfg.model_enabled,
+            entail_index=cache_cfg.entail_index,
+            contradict_index=cache_cfg.contradict_index,
+        )
         hashed_items.append((pair_hash, s1, s2))
         if pair_hash not in pair_by_hash:
             pair_by_hash[pair_hash] = (s1, s2)
@@ -357,17 +476,47 @@ def judge_bulk(pairs: list[tuple[str, str]]) -> list[JudgmentOutput]:
             owned_error: BaseException | None = None
             try:
                 owned_results, new_records = _compute_uncached_pairs(owned_pairs)
+                store_hash_by_owned = {rec.pair_hash: rec.pair_hash for rec in new_records}
+                if (
+                    cache_cfg.model_enabled
+                    and cache_cfg.model_revision == "unknown"
+                    and cache_cfg.model_name == nli_engine.model_name
+                    and nli_engine.model_revision
+                ):
+                    post_cfg = _resolve_cache_config(
+                        model_name=cache_cfg.model_name,
+                        policy_version=cache_cfg.policy_version,
+                        entail_threshold=cache_cfg.threshold_value,
+                        model_revision=nli_engine.model_revision,
+                        model_enabled=cache_cfg.model_enabled,
+                        entail_index=cache_cfg.entail_index,
+                        contradict_index=cache_cfg.contradict_index,
+                    )
+                    for rec in new_records:
+                        old_hash = rec.pair_hash
+                        new_hash = _hash_normalized_pair(
+                            normalize_sentence(rec.sentence1),
+                            normalize_sentence(rec.sentence2),
+                            post_cfg,
+                        )
+                        store_hash_by_owned[old_hash] = new_hash
+                        rec.pair_hash = new_hash
+
                 persisted_by_hash = _persist_records_safely(new_records)
-                for pair_hash, rec in persisted_by_hash.items():
-                    if pair_hash in owned_results:
-                        owned_results[pair_hash] = JudgmentOutput(
+                cache_entries: dict[str, JudgmentOutput] = {}
+                for old_hash, store_hash in store_hash_by_owned.items():
+                    rec = persisted_by_hash.get(store_hash)
+                    if rec is not None and old_hash in owned_results:
+                        out = JudgmentOutput(
                             label=rec.label,
                             score=round(float(rec.score), 4),
                             tier_used=rec.tier_used,
                             cached=False,
                         )
-                if owned_results:
-                    _cache_put_many(owned_results)
+                        owned_results[old_hash] = out
+                        cache_entries[store_hash] = out
+                if cache_entries:
+                    _cache_put_many(cache_entries)
                 computed_by_hash.update(owned_results)
             except BaseException as exc:
                 owned_error = exc
